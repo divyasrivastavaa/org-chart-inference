@@ -13,8 +13,12 @@ st.set_page_config(page_title="Org Chart Inference", layout="wide")
 
 @st.cache_data
 def load():
-    # On a fresh server (e.g. Streamlit Cloud) the CSVs don't exist yet: build them once
-    if not Path("data/predictions.csv").exists():
+    # On a fresh server (e.g. Streamlit Cloud) the CSVs don't exist yet: build them once.
+    # Also rebuild if they were made by an older version of the code (no "scenario" column).
+    stale = (not Path("data/predictions.csv").exists()
+             or "scenario" not in pd.read_csv("data/truth.csv", nrows=1).columns
+             or "is_contractor" not in pd.read_csv("data/predictions.csv", nrows=1).columns)
+    if stale:
         import generate_data, infer
         generate_data.main()
         infer.main()

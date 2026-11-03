@@ -26,9 +26,12 @@ Take-home task for Firmable (B2B sales intelligence). Deadline: Sat 7 Nov 2026.
 - Full loop: `python generate_data.py && python infer.py && python evaluate.py`
 - App: `streamlit run app.py`
 
-## Current baseline (threshold 0.75)
-Precision 99.1%, coverage 73.1%, 950 wrong edges / 110,036. Directors weakest (94.3%).
-Any change must be reported against this baseline.
+## Current baseline (threshold 0.75), see docs/experiments.md
+- v2 data (default, seed 42): precision 95.1%, coverage 62.9%, 4,831 wrong edges.
+- v2 held-out (`--seed 7`): 95.3% / 64.0%. v1 (`--v1`): 99.4% / 73.4%.
+- Weakest: shared-manager teams (59% precision).
+Any change must be reported against this baseline, on all three datasets,
+and logged in docs/experiments.md.
 
 ## Rules for working in this repo
 - The user is new to Git/terminals: explain each change, then give exact git commands.
