@@ -1,0 +1,28 @@
+Decision tree for edge confidence. Each leaf: P(edge is correct), training edges.
+Edges below 0.8 are not drawn.
+
+f_team_skips <= 0.5
+|   f_teamless_peers <= 0.5
+|   |   f_function_size <= 60.5
+|   |   |   f_company_size <= 906.0
+|   |   |   |   --> P(correct) = 0.982  (38966 edges)  draw
+|   |   |   f_company_size >  906.0
+|   |   |   |   --> P(correct) = 0.934  (1268 edges)  draw
+|   |   f_function_size >  60.5
+|   |   |   f_empty_skips <= 0.5
+|   |   |   |   --> P(correct) = 0.968  (14884 edges)  draw
+|   |   |   f_empty_skips >  0.5
+|   |   |   |   --> P(correct) = 0.795  (767 edges)  abstain
+|   f_teamless_peers >  0.5
+|   |   f_company_size <= 309.5
+|   |   |   f_function_size <= 16.5
+|   |   |   |   --> P(correct) = 0.675  (209 edges)  abstain
+|   |   |   f_function_size >  16.5
+|   |   |   |   --> P(correct) = 0.992  (4861 edges)  draw
+|   |   f_company_size >  309.5
+|   |   |   f_teamless_peers <= 1.5
+|   |   |   |   --> P(correct) = 0.903  (11007 edges)  draw
+|   |   |   f_teamless_peers >  1.5
+|   |   |   |   --> P(correct) = 0.789  (3440 edges)  abstain
+f_team_skips >  0.5
+|   --> P(correct) = 0.000  (965 edges)  abstain

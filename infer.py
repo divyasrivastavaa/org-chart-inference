@@ -3,9 +3,14 @@ infer.py  -  Steps 4 and 5
 Reads data/employees.csv (messy, no manager column) and writes data/predictions.csv:
 one row per person with a predicted manager + confidence, or a blank manager + reason.
 """
+import json
 import re
+import sys
+from pathlib import Path
 
 import pandas as pd
+
+MODEL_PATH = Path(__file__).parent / "models" / "confidence_tree.json"
 
 # ---------------------------------------------------------------- Step 4: clean titles
 # Applied in order, on lower-case text, as whole words
@@ -164,16 +169,21 @@ def infer_company(co):
     teamless_directors = {f: {e for e, t in pool if t is None}
                           for (f, lvl), pool in index.items() if lvl == 4}
 
+    func_size = co.function.value_counts().to_dict()
+    unknown_count = co[co.level.isna()].function.fillna("?").value_counts().to_dict()
+
     out = []
     for p in co.itertuples():
         pred, conf, reason = None, 0.0, ""
+        empty_skips = team_skips = 0
+        matched_pool = []
         if pd.isna(p.level) or p.function is None or pd.isna(p.function):
             reason = "title could not be parsed"
         elif p.level == 1:
             reason = "top of company"
         elif p.level == 2:
             if len(ceos) == 1:
-                pred, conf = ceos[0][0], BASE
+                pred, conf, matched_pool = ceos[0][0], BASE, ceos
             else:
                 reason = f"{len(ceos)} CEOs found"
         elif p.team and isinstance(p.team_function, str) and p.team_function != p.function:
@@ -191,7 +201,9 @@ def infer_company(co):
                     break
                 if not pool:                          # nobody at this layer at all
                     penalty += EMPTY_SKIP_PENALTY
+                    empty_skips += 1
                     continue
+                matched_pool = pool
                 if lvl in (4, 5):                     # team-level managers
                     if p.team:
                         match = [e for e, t in pool if t == p.team]
@@ -205,6 +217,7 @@ def infer_company(co):
                             reason = "candidate managers have unknown team"
                             break
                         penalty += TEAM_SKIP_PENALTY  # layer exists, not for my team
+                        team_skips += 1
                         continue
                     if len(pool) == 1:
                         pred = pool[0][0]
@@ -224,13 +237,64 @@ def infer_company(co):
                     conf -= UNKNOWN_PENALTY
             elif not reason:
                 reason = "no more-senior person in same function"
-        out.append(dict(employee_id=p.employee_id, pred_manager_id=pred,
-                        confidence=round(max(conf, 0), 2), reason=reason))
+        row = dict(employee_id=p.employee_id, pred_manager_id=pred,
+                   rule_confidence=round(max(conf, 0), 2), reason=reason)
+        if pred is not None:                          # evidence behind this edge
+            mgr_level = 1 if p.level == 2 else lvl    # lvl = layer where the loop matched
+            row.update(
+                f_level=p.level, f_manager_level=mgr_level, f_gap=p.level - mgr_level,
+                f_empty_skips=empty_skips, f_team_skips=team_skips,
+                f_has_team=int(bool(p.team)), f_is_contractor=int(bool(p.is_contractor)),
+                f_pool_size=len(matched_pool),
+                f_teamless_peers=sum(1 for e, t in matched_pool if t is None and e != pred),
+                f_unknown_in_function=unknown_count.get(p.function, 0)
+                + unknown_count.get("?", 0),
+                f_function_size=func_size.get(p.function, 0), f_company_size=len(co))
+        out.append(row)
     return out
 
 
-def main(threshold=0.75):
-    df = pd.read_csv("data/employees.csv")
+# ---------------------------------------------------------------- learned confidence
+# The tree is trained by train_confidence.py on a separate dataset (seed 1) and saved as
+# plain JSON, so the app needs no scikit-learn at run time.
+FEATURES = ["f_level", "f_manager_level", "f_gap", "f_empty_skips", "f_team_skips",
+            "f_has_team", "f_is_contractor", "f_pool_size", "f_teamless_peers",
+            "f_unknown_in_function", "f_function_size", "f_company_size", "f_span_ratio"]
+RULE_THRESHOLD = 0.75
+
+
+def add_span_feature(pred):
+    """How many people we gave each manager, compared with similar managers in the
+    company. A manager collecting double the usual team hints at a missing co-manager."""
+    edges = pred[pred.pred_manager_id.notna()]
+    n = edges.groupby("pred_manager_id").size().rename("n_reports")
+    pred["f_span_ratio"] = None
+    if edges.empty:
+        return pred
+    e = edges[["company_id", "pred_manager_id", "f_manager_level"]].drop_duplicates(
+        "pred_manager_id").join(n, on="pred_manager_id")
+    e["typical"] = e.groupby(["company_id", "f_manager_level"]).n_reports.transform("median")
+    ratio = (e.n_reports / e.typical).round(2)
+    pred["f_span_ratio"] = pred.pred_manager_id.map(dict(zip(e.pred_manager_id, ratio)))
+    return pred
+
+
+def tree_predict(model, X):
+    """Walk the saved decision tree for each row. Returns P(edge is correct)."""
+    left, right = model["children_left"], model["children_right"]
+    feat, thr, prob = model["feature"], model["threshold"], model["prob"]
+    out = []
+    for x in X:
+        node = 0
+        while left[node] != -1:
+            node = left[node] if x[feat[node]] <= thr[node] else right[node]
+        out.append(prob[node])
+    return out
+
+
+def main(data_dir="data", use_model=True):
+    data_dir = Path(data_dir)
+    df = pd.read_csv(data_dir / "employees.csv")
     # Duplicates: same person listed twice -> keep one
     df = df.drop_duplicates(subset=["company_id", "full_name", "title", "department",
                                     "location"])
@@ -244,13 +308,30 @@ def main(threshold=0.75):
     for _, co in df.groupby("company_id"):
         rows.extend(infer_company(co))
     pred = df.merge(pd.DataFrame(rows), on="employee_id")
+    pred = add_span_feature(pred)
+
+    has_edge = pred.pred_manager_id.notna()
+    if use_model and MODEL_PATH.exists():
+        model = json.loads(MODEL_PATH.read_text())
+        X = pred.loc[has_edge, FEATURES].astype(float).fillna(-1).values
+        pred["confidence"] = 0.0
+        pred.loc[has_edge, "confidence"] = [round(p, 3) for p in tree_predict(model, X)]
+        threshold, source = model["decision_threshold"], "decision tree"
+    else:
+        pred["confidence"] = pred.rule_confidence
+        threshold, source = RULE_THRESHOLD, "hand-set rules"
+
     # Abstain below the threshold: a wrong edge is worse than no edge
     low = pred.confidence < threshold
-    pred.loc[low & pred.pred_manager_id.notna(), "reason"] = "confidence below threshold"
+    pred.loc[low & has_edge, "reason"] = "confidence below threshold"
     pred["manager_id"] = pred.pred_manager_id.where(~low)
-    pred.to_csv("data/predictions.csv", index=False)
-    print(f"{len(pred)} people, {pred.manager_id.notna().mean():.1%} got a manager")
+    pred["threshold"] = threshold
+    pred.to_csv(data_dir / "predictions.csv", index=False)
+    print(f"{len(pred)} people, {pred.manager_id.notna().mean():.1%} got a manager "
+          f"(confidence from {source}, threshold {threshold})")
 
 
 if __name__ == "__main__":
-    main()
+    # python infer.py [data_dir] [--rules]   (--rules ignores the trained tree)
+    args = [a for a in sys.argv[1:] if not a.startswith("--")]
+    main(args[0] if args else "data", use_model="--rules" not in sys.argv)

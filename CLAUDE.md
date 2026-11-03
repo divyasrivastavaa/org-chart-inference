@@ -15,21 +15,28 @@ Take-home task for Firmable (B2B sales intelligence). Deadline: Sat 7 Nov 2026.
 
 ## Pipeline
 1. `generate_data.py` -> `data/truth.csv` (answer key) + `data/employees.csv` (messy, no manager)
-2. `infer.py`        -> `data/predictions.csv` (manager_id, confidence, reason)
-3. `evaluate.py`     -> precision / coverage / wrong edges, threshold sweep, calibration, by level
-4. `app.py`          -> Streamlit app (builds the data itself if `data/` is missing)
+2. `infer.py`        -> `data/predictions.csv` (manager_id, confidence, reason, f_* features)
+3. `evaluate.py`     -> precision / coverage / wrong edges, Brier, sweep, calibration, scenarios
+4. `app.py`          -> Streamlit app (builds the data itself if `data/` is missing or stale)
+5. `train_confidence.py` -> trains the edge-confidence tree on a separate seed-1 dataset,
+   saves `models/confidence_tree.json` (used by infer.py) + `.txt` (readable rules)
 
-`data/` is git-ignored; everything is reproducible from seed 42.
+`data/` is git-ignored; everything is reproducible (app data seed 42, held-out seed 7,
+training seed 1). `models/` IS committed (the hosted app needs it).
 
 ## Commands (Windows, from the repo root)
 - Activate env: `.venv\Scripts\activate`
-- Full loop: `python generate_data.py && python infer.py && python evaluate.py`
+- Full loop: `python generate_data.py`, `python infer.py`, `python evaluate.py`
+- Held out: `python generate_data.py --seed 7 --out data/holdout_seed7`,
+  `python infer.py data/holdout_seed7`, `python evaluate.py data/holdout_seed7`
+- Retrain confidence: `python train_confidence.py` (`python infer.py --rules` = no tree)
 - App: `streamlit run app.py`
 
 ## Current baseline (threshold 0.75), see docs/experiments.md
-- v2 data (default, seed 42): precision 95.1%, coverage 62.9%, 4,831 wrong edges.
-- v2 held-out (`--seed 7`): 95.3% / 64.0%. v1 (`--v1`): 99.4% / 73.4%.
-- Weakest: shared-manager teams (59% precision).
+Decision tree confidence, threshold 0.8 (wrong edge = 4x a missing edge):
+- v2 data (default, seed 42): precision 96.3%, coverage 58.7%, 3,465 wrong edges, Brier 0.0433.
+- v2 held-out (`--seed 7 --out data/holdout_seed7`): 96.3% / 60.6%, Brier 0.0420.
+- Weakest: shared-manager teams (63% precision), manager missing from the data.
 Any change must be reported against this baseline, on all three datasets,
 and logged in docs/experiments.md.
 

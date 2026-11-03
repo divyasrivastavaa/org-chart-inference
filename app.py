@@ -17,7 +17,7 @@ def load():
     # Also rebuild if they were made by an older version of the code (no "scenario" column).
     stale = (not Path("data/predictions.csv").exists()
              or "scenario" not in pd.read_csv("data/truth.csv", nrows=1).columns
-             or "is_contractor" not in pd.read_csv("data/predictions.csv", nrows=1).columns)
+             or "rule_confidence" not in pd.read_csv("data/predictions.csv", nrows=1).columns)
     if stale:
         import generate_data, infer
         generate_data.main()
@@ -37,7 +37,11 @@ st.caption("Reporting lines inferred from job titles only. "
 companies = df[["company_id", "company_name"]].drop_duplicates().sort_values("company_name")
 label = st.sidebar.selectbox("Company", companies.company_name + " (" + companies.company_id + ")")
 cid = label[-5:-1]
-threshold = st.sidebar.slider("Confidence threshold", 0.5, 1.0, 0.75, 0.05)
+default_t = float(df.threshold.iloc[0]) if "threshold" in df else 0.75  # set by infer.py
+threshold = st.sidebar.slider("Confidence threshold", 0.5, 1.0, default_t, 0.05,
+                              help="Confidence comes from a decision tree trained on a "
+                                   "separate dataset. Default 0.8: a wrong edge is treated "
+                                   "as 4x worse than a missing one.")
 co = df[df.company_id == cid].copy()
 co["manager_id"] = co.pred_manager_id.where(co.confidence >= threshold)
 below = co.pred_manager_id.notna() & co.manager_id.isna()

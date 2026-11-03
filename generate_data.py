@@ -317,18 +317,19 @@ def make_messy(df):
     return m[keep]
 
 
-def main(version=2, seed=SEED):
+def main(version=2, seed=SEED, out=OUT):
     global V2
     V2 = version == 2
     random.seed(seed)
-    OUT.mkdir(exist_ok=True)
+    out = Path(out)
+    out.mkdir(parents=True, exist_ok=True)
     used, rows = set(), []
     for cid in range(1, N_COMPANIES + 1):
         rows.extend(build_company(cid, used))
     truth = pd.DataFrame(rows)
-    truth.to_csv(OUT / "truth.csv", index=False)
+    truth.to_csv(out / "truth.csv", index=False)
     messy = make_messy(truth)
-    messy.to_csv(OUT / "employees.csv", index=False)
+    messy.to_csv(out / "employees.csv", index=False)
     per_co = truth.groupby("company_id").size()
     print(f"v{version}: {truth.company_id.nunique()} companies, {len(truth)} true employees, "
           f"{len(messy)} rows in employees.csv")
@@ -339,5 +340,7 @@ def main(version=2, seed=SEED):
 
 if __name__ == "__main__":
     # --seed N builds a different dataset with the same recipe: a held-out test set
+    # --out DIR writes somewhere other than data/ (e.g. data/holdout_seed7)
     seed = int(sys.argv[sys.argv.index("--seed") + 1]) if "--seed" in sys.argv else SEED
-    main(1 if "--v1" in sys.argv else 2, seed)
+    out = sys.argv[sys.argv.index("--out") + 1] if "--out" in sys.argv else OUT
+    main(1 if "--v1" in sys.argv else 2, seed, out)

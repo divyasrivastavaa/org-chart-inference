@@ -62,3 +62,42 @@ Remaining weak spot, shared-manager teams (59% precision): 2,059 of the 2,388 wr
 there happen because the *other* manager's title lost its team, so the rules see one
 candidate. This is a confidence problem rather than a parsing one -> E4: learn confidence
 with a decision tree, using features like "teamless manager in my function".
+
+## E4. Learned confidence: decision tree replaces hand-set penalties (3 Nov 2026)
+Setup (`train_confidence.py`):
+- Trained on a **separate dataset (v2, seed 1)**. The app data (seed 42) and the held-out
+  set (seed 7) are never seen in training, so the precision shown in the app isn't inflated.
+- One row per proposed edge, label = edge is correct. Split **by company**: 400 train /
+  100 validation companies.
+- 13 features from the inference evidence: levels, layers skipped (empty vs. not-my-team),
+  has team, contractor, size of candidate pool, **teamless managers at the same level**,
+  unparsed titles nearby, function and company size, manager's span vs. similar managers.
+- `DecisionTreeClassifier(max_depth=4, min_samples_leaf=200)`: 9 leaves, readable in
+  `models/confidence_tree.txt`. Depth 8 had a slightly better validation Brier score
+  (0.0440 vs 0.0465), but its 57 leaves can't be read; I chose readability.
+- **Threshold not tuned, derived:** if a wrong edge costs 4x a missing edge, draw the edge
+  when P(correct) > 4/5 = **0.8**.
+- Saved as JSON and walked by ~10 lines in `infer.py`: the app needs no scikit-learn. The
+  training script asserts that the JSON walker agrees with scikit-learn.
+
+| Dataset | Confidence | Precision | Coverage | Wrong edges | Brier (lower = better) |
+|---|---|---|---|---|---|
+| v2 seed 42 (app) | hand-set rules @0.75 | 95.1% | 62.9% | 4,831 | 0.0538 |
+| v2 seed 42 (app) | **tree @0.8** | **96.3%** | 58.7% | **3,465** | **0.0433** |
+| v2 seed 7 (held out) | hand-set rules @0.75 | 95.3% | 64.0% | 4,558 | 0.0511 |
+| v2 seed 7 (held out) | **tree @0.8** | **96.3%** | 60.6% | **3,399** | **0.0420** |
+
+Trade-off: 28% fewer wrong edges for ~4 points less coverage, which is what a 4:1 cost asks for.
+Calibration on validation companies: the 0.79 band is right 79.6%, the 0.98 band 97.4%. The
+hand-set scores were not like this (their 0.6-0.7 band was 0% right).
+
+What the tree learned (worth discussing):
+- Skipping a layer that exists for other teams -> **0% correct** (965 edges). The hand-set
+  rule gave these 0.70; the tree says never draw them.
+- 2+ teamless managers at the same level in a big company -> 79% -> abstain. This is the
+  shared-manager-team signal.
+- Only 5 of 13 features are used at depth 4; the span ratio isn't used.
+
+Still weak: shared-manager teams (63% precision, coverage cut to 16%) and manager-missing
+cases (every edge drawn there is wrong by definition: 13% coverage). The features can't
+fully tell these apart from normal teams.
