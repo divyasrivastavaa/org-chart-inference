@@ -1,0 +1,19 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(git status:*)",
+      "Bash(git diff:*)",
+      "Bash(git log:*)",
+      "PowerShell(git status*)",
+      "PowerShell(git diff*)",
+      "PowerShell(git log*)",
+      "PowerShell(.\\.venv\\Scripts\\python.exe generate_data.py)",
+      "PowerShell(.\\.venv\\Scripts\\python.exe infer.py)",
+      "PowerShell(.\\.venv\\Scripts\\python.exe evaluate.py)"
+    ],
+    "deny": [
+      "PowerShell(git push --force*)",
+      "Bash(git push --force:*)"
+    ]
+  }
+}

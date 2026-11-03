@@ -1,0 +1,4 @@
+# Offline experiments only. NOT used by the hosted app (too heavy for Streamlit Cloud).
+# Install into the venv with:  pip install -r requirements-research.txt
+-r requirements.txt
+gliner

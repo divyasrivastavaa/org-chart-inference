@@ -1,0 +1,13 @@
+# Streamlit settings. Streamlit Community Cloud reads this file too.
+# Docs: https://docs.streamlit.io/develop/api-reference/configuration/config.toml
+
+[server]
+headless = true            # don't try to open a browser on the server
+
+[browser]
+gatherUsageStats = false   # no telemetry
+
+[theme]
+base = "light"
+primaryColor = "#2E6FD8"   # slider / buttons
+font = "sans serif"

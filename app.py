@@ -90,7 +90,7 @@ lines.append("}")
 st.subheader(f"{info.company_name} — {func}")
 if show_truth:
     st.caption("Green = matches the answer key, red = wrong. Edge labels show confidence.")
-st.graphviz_chart("\n".join(lines), use_container_width=True)
+st.graphviz_chart("\n".join(lines), width="stretch")
 
 # ---------------------------------------------------------------- lookups and gaps
 st.subheader("Who does this person report to?")
@@ -110,4 +110,4 @@ else:
 
 st.subheader("People left without a manager")
 st.dataframe(co[co.manager_id.isna()][["full_name", "title", "department", "reason"]],
-             use_container_width=True, hide_index=True)
+             width="stretch", hide_index=True)
