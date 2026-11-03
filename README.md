@@ -50,5 +50,12 @@ streamlit run app.py      # opens the app
 - Better next steps: an LLM to parse unusual titles, using LinkedIn-style tenure and location as tie-breakers, and learning the confidence weights from labelled data instead of hand-setting them.
 
 ## How I used AI
+I used Claude Code, an AI coding assistant, inside VS Code for this project.
 
-<your own notes: what you asked Claude/ChatGPT for, what you changed or fixed yourself, what you learned>
+The AI wrote most of the code: the data generator, the inference rules, the evaluation and the app.
+I read the task brief, set the goal, and asked the AI to explain every step in simple words so I understood what the code does.
+I checked the results myself: I tested the live app, looked at people the model left without a manager, and checked that the reasons made sense.
+I made the key choices, like preferring precision over coverage, testing on a separate held-out dataset, and adding the decision tree for confidence.
+Before each upload, I checked git status so that private files, like the task brief, were never made public.
+I can explain every file, and I have kept the AI’s notes in docs/experiments.md so reviewers can see what was tried.
+
