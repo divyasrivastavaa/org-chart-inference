@@ -140,11 +140,10 @@ python evaluate.py data/holdout_seed7
 | `CLAUDE.md`, `.claude/` | project context and an `/eval` command for Claude Code |
 
 ## How I used AI
-I used Claude Code, an AI coding assistant, inside VS Code for this project.
-
-The AI wrote most of the code: the data generator, the inference rules, the evaluation and the app.
-I read the task brief, set the goal, and asked the AI to explain every step in simple words so I understood what the code does.
-I checked the results myself: I tested the live app, looked at people the model left without a manager, and checked that the reasons made sense.
-I made the key choices, like preferring precision over coverage, testing on a separate held-out dataset, and adding the decision tree for confidence.
-Before each upload, I checked git status so that private files, like the task brief, were never made public.
-I can explain every file, and I have kept the AI’s notes in docs/experiments.md so reviewers can see what was tried.
+- I used Claude Code, an AI coding assistant, inside VS Code for this project.
+- The AI wrote most of the code: the data generator, the inference rules, the evaluation and the app.
+- I read the task brief, set the goal, and asked the AI to explain every step in simple words so I understood what the code does.
+- I checked the results myself: I tested the live app, looked at people the model left without a manager, and checked that the reasons made sense.
+- I made the key choices, like preferring precision over coverage, testing on a separate held-out dataset, and adding the decision tree for confidence.
+- Before each upload, I checked git status so that private files, like the task brief, were never made public.
+- I can explain every file, and I have kept the AI’s notes in docs/experiments.md so reviewers can see what was tried.
