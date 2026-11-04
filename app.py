@@ -10,6 +10,8 @@ from pathlib import Path
 import pandas as pd
 import streamlit as st
 
+import org_chart
+
 st.set_page_config(page_title="Org Chart Inference", layout="wide")
 
 
@@ -156,47 +158,20 @@ func = st.sidebar.selectbox("Function", functions)
 info = co.iloc[0]
 coverage, precision = score(apply_threshold(scored[scored.company_id == cid], threshold))
 c1, c2, c3, c4 = st.columns(4)
-c1.metric("Employees", len(co))
+c1.metric("Employees", len(co),
+          help="People listed for this company, after removing duplicate rows")
 c2.metric("Industry", info.industry)
-c3.metric("Coverage", f"{coverage:.0%}")
+c3.metric("Coverage", f"{coverage:.0%}",
+          help="Share of people (excluding the CEO) who got a manager at this threshold")
 if show_truth:
-    c4.metric("Precision", f"{precision:.1%}")
+    c4.metric("Precision", f"{precision:.1%}",
+              help="Of the reporting lines drawn, the share that match the answer key")
 
 # ---------------------------------------------------------------- the org chart
 view = co if func == "All" else co[(co.function == func) | (co.level == 1)]
-
-
-def node_label(r):
-    title = r.title if isinstance(r.title, str) else "(no title)"
-    return f"{r.full_name}\\n{title[:40]}"
-
-
-def colour(r):
-    if not show_truth or pd.isna(r.manager_id):
-        return "white"
-    return "#d9f2e3" if r.manager_id == r.true_manager_id else "#f8d7d7"
-
-
-managers_shown = set(view.manager_id.dropna())
-if func == "All" and len(view) > 120:
-    st.info("Large company: showing leadership (Manager and above) only. "
-            "Pick a function in the sidebar to see everyone in it.")
-    view = view[(view.level <= 5) | view.employee_id.isin(managers_shown)]
-
-ids = set(view.employee_id)
-lines = ['digraph G {', 'rankdir=TB; node [shape=box, style="rounded,filled", '
-         'fontname=Helvetica, fontsize=10];']
-for r in view.itertuples():
-    lines.append(f'"{r.employee_id}" [label="{node_label(r)}", fillcolor="{colour(r)}"];')
-for r in view[view.manager_id.notna()].itertuples():
-    if r.manager_id in ids:
-        lines.append(f'"{r.manager_id}" -> "{r.employee_id}" '
-                     f'[label="{r.confidence:.2f}", fontsize=8];')
-lines.append("}")
 st.subheader(f"{info.company_name} — {func}")
-if show_truth:
-    st.caption("Green = matches the answer key, red = wrong. Edge labels show confidence.")
-st.graphviz_chart("\n".join(lines), width="stretch")
+# Our own HTML: names and titles are escaped inside org_chart.py before display
+st.iframe(org_chart.render_html(view, show_truth), height=720)
 
 # ---------------------------------------------------------------- lookups and gaps
 st.subheader("Who does this person report to?")
