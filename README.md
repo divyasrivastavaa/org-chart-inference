@@ -41,6 +41,17 @@ messy data:
   each number.
 - Also: a "Who does this person report to?" chain and a function filter.
 
+Screenshots, in case the app is asleep:
+
+**Front page:** overall results and the searchable, sortable company table
+![Front page with the company table](docs/images/front_page.png)
+
+**Expanded org chart** (Atlasatlas Pty Ltd, C490): CEO, their direct reports, and one team opened
+![Expanded org chart](docs/images/org_chart_expanded.png)
+
+**Not placed:** people without a confident manager, each with the reason
+![Not placed section](docs/images/not_placed.png)
+
 ## How I know it works
 
 Designing the data so it could be scored was the first decision:
@@ -127,7 +138,8 @@ a new held-out set.
 
 ## How to run
 
-Windows, Python 3.13:
+Windows, Python 3.13. Library versions are pinned in `requirements.txt` (the exact versions
+the app was tested with), so the hosted app doesn't change when new releases come out.
 
 ```
 python -m venv .venv
