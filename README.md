@@ -23,6 +23,24 @@ messy data:
 - Confidence is **calibrated**: lines scored ~0.8 are right ~80% of the time, ~0.98 about 97%.
 - Full history of every change and its numbers: [docs/experiments.md](docs/experiments.md).
 
+## The app
+
+- **Front page:** overall precision and coverage, plus a table of all 500 companies (name,
+  industry, employees, coverage, precision). You can search it, sort it by any column, and
+  click a row to open that company. The sidebar dropdown stays in sync.
+- **Shareable links:** each company has its own address, e.g.
+  [?company=C490](https://divya-org-chart.streamlit.app/?company=C490).
+- **Expandable org chart:** starts with the CEO. Each card shows name, title and the
+  confidence of the line to their manager, plus a count of everyone under that person.
+  Click the count to open their direct reports, and "Collapse" to close them.
+- **"Not placed" section:** people the model didn't give a manager are listed with the
+  reason, so nobody is lost. Teams under them can still be expanded.
+- **Accuracy view:** with "Show accuracy" ticked, cards are green (matches the answer key)
+  or red (wrong). The confidence slider shows what changes at other thresholds.
+- **Tooltips:** the "?" next to Employees, Coverage, Precision and the threshold explain
+  each number.
+- Also: a "Who does this person report to?" chain and a function filter.
+
 ## How I know it works
 
 Designing the data so it could be scored was the first decision:
@@ -133,7 +151,8 @@ python evaluate.py data/holdout_seed7
 | `infer.py` | title parsing, manager search, abstentions, tree confidence |
 | `train_confidence.py` | trains the confidence tree on a separate dataset |
 | `evaluate.py` | scores predictions against the answer key |
-| `app.py` | Streamlit app |
+| `app.py` | Streamlit app: company table, company page |
+| `org_chart.py` | the expandable org chart (plain HTML/CSS/JavaScript) |
 | `models/` | the trained tree (JSON + readable rules) |
 | `docs/experiments.md` | every experiment and its numbers |
 | `docs/research_models.md` | notes on decision models and GLiNER |
