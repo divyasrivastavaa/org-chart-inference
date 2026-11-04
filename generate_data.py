@@ -33,6 +33,7 @@ SEED = 42
 N_COMPANIES = 500
 OUT = Path("data")
 V2 = True                                  # set by main()
+rng = random.Random(SEED)                  # private generator, set by main()
 
 FIRST = ["Aarav", "Priya", "Liam", "Olivia", "Noah", "Emma", "Rohan", "Ananya", "Jack", "Mia",
          "Wei", "Mei", "Arjun", "Sara", "Lucas", "Chloe", "Ethan", "Zara", "Kabir", "Isla",
@@ -124,12 +125,12 @@ EMBEDDED_P = 0.25         # analytics IC embedded in a business team (dotted lin
 
 # ---------------------------------------------------------------- Step 2: true org
 def pick_size():
-    r, acc = random.random(), 0
+    r, acc = rng.random(), 0
     for lo, hi, share in SIZE_BANDS:
         acc += share
         if r <= acc:
-            return random.randint(lo, hi)
-    return random.randint(100, 200)
+            return rng.randint(lo, hi)
+    return rng.randint(100, 200)
 
 
 def clean_title(func, level, team):
@@ -143,17 +144,17 @@ def clean_title(func, level, team):
 
 def make_name():
     if not V2:
-        return f"{random.choice(FIRST)} {random.choice(LAST)}"
-    first, last = random.choice(FIRST + MORE_FIRST), random.choice(LAST + MORE_LAST)
-    if random.random() < 0.10:
-        return f"{first} {random.choice('ABCDEGHJKLMNPRST')}. {last}"
+        return f"{rng.choice(FIRST)} {rng.choice(LAST)}"
+    first, last = rng.choice(FIRST + MORE_FIRST), rng.choice(LAST + MORE_LAST)
+    if rng.random() < 0.10:
+        return f"{first} {rng.choice('ABCDEGHJKLMNPRST')}. {last}"
     return f"{first} {last}"
 
 
 def real_world_title(func, level, team):
     """v2: the title a person actually uses. Returns (title, is_variant)."""
     if level == 1:
-        return (random.choice(CEO_TITLES), True) if random.random() < 0.5 \
+        return (rng.choice(CEO_TITLES), True) if rng.random() < 0.5 \
             else ("Chief Executive Officer", False)
     clean = clean_title(func, level, team)
     _, _, _, _, area, ic = FUNCTIONS[func]
@@ -171,16 +172,16 @@ def real_world_title(func, level, team):
                    f"Trainee {ic}, {team}"]),
     }[level]
     p, choices = options
-    if random.random() < p:
-        return random.choice(choices), True
+    if rng.random() < p:
+        return rng.choice(choices), True
     return clean, False
 
 
 def build_company(cid, used_names):
-    size, industry, hq = pick_size(), random.choice(INDUSTRIES), random.choice(LOCATIONS)
-    name = f"{random.choice(WORDS)}{random.choice(WORDS).lower()} {random.choice(SUFFIX)}"
+    size, industry, hq = pick_size(), rng.choice(INDUSTRIES), rng.choice(LOCATIONS)
+    name = f"{rng.choice(WORDS)}{rng.choice(WORDS).lower()} {rng.choice(SUFFIX)}"
     while name in used_names:
-        name += " " + random.choice(["AU", "Global", "Holdings"])
+        name += " " + rng.choice(["AU", "Global", "Holdings"])
     used_names.add(name)
     people = []
 
@@ -189,7 +190,7 @@ def build_company(cid, used_names):
         row = dict(
             company_id=f"C{cid:03d}", company_name=name, industry=industry, size=size,
             employee_id=pid, full_name=make_name(),
-            location=hq if random.random() < 0.7 else random.choice(LOCATIONS),
+            location=hq if rng.random() < 0.7 else rng.choice(LOCATIONS),
             department=FUNCTIONS[func][0] if func != "Executive" else "Executive",
             true_function=func, true_level=level, true_team=team,
             title="Chief Executive Officer" if level == 1 else clean_title(func, level, team),
@@ -198,10 +199,10 @@ def build_company(cid, used_names):
             dotted_manager_id=None)
         if V2:
             row["title"], row["title_variant"] = real_world_title(func, level, team)
-            if level >= 6 and random.random() < CONTRACTOR_P:
+            if level >= 6 and rng.random() < CONTRACTOR_P:
                 row["employment_type"] = "contractor"
-                row["title"] = random.choice(CONTRACT_FORMATS).format(t=row["title"])
-            if level in (3, 4, 5) and random.random() < MISSING_MGR_P:
+                row["title"] = rng.choice(CONTRACT_FORMATS).format(t=row["title"])
+            if level in (3, 4, 5) and rng.random() < MISSING_MGR_P:
                 row["in_dataset"] = False          # left the company / no public profile
         people.append(row)
         return pid
@@ -209,7 +210,7 @@ def build_company(cid, used_names):
     ceo = add("Executive", 1, None, None)
     funcs = list(FUNCTIONS)
     if size < 200:                         # small companies skip one of these functions
-        funcs.remove(random.choice(["Security", "Data"]))
+        funcs.remove(rng.choice(["Security", "Data"]))
     total_w = sum(FUNCTIONS[f][2] for f in funcs)
     managers = []
     shared = set()                         # managers who share a team with another manager
@@ -226,17 +227,17 @@ def build_company(cid, used_names):
             boss = add(func, 4, team, top) if per_team > 20 else top  # big team -> Director
             n_ic = max(1, per_team - (2 if boss != top else 1))
             mgrs = [add(func, 5, team, boss)]
-            if V2 and n_ic >= 12 and random.random() < SHARED_TEAM_P:
+            if V2 and n_ic >= 12 and rng.random() < SHARED_TEAM_P:
                 mgrs.append(add(func, 5, team, boss))                # two managers, one team
                 shared.update(mgrs)
                 n_ic -= 1
             for m in mgrs:
                 managers.append((func, team, m))
             for i in range(n_ic):
-                r = random.random()
+                r = rng.random()
                 add(func, 6 if r < 0.3 else (7 if r < 0.85 else 8), team, mgrs[i % len(mgrs)])
     while len(people) < max(100, size):    # rounding can leave us short: top up
-        func, team, mgr = random.choice(managers)
+        func, team, mgr = rng.choice(managers)
         add(func, 7, team, mgr)
 
     if V2:
@@ -260,8 +261,8 @@ def embed_analysts(people, managers):
         return
     for p in people:
         if (p["true_function"] == "Data" and p["true_team"] == "Analytics"
-                and p["true_level"] >= 6 and random.random() < EMBEDDED_P):
-            func, team, mgr = random.choice(targets)
+                and p["true_level"] >= 6 and rng.random() < EMBEDDED_P):
+            func, team, mgr = rng.choice(targets)
             p["dotted_manager_id"] = mgr
             p["department"] = FUNCTIONS[func][0]
             p["title"] = p["title"].replace("Analytics", team)
@@ -284,21 +285,21 @@ SYNONYM = [("VP of ", "Vice President, "), ("Director of ", "Head of "),
 def messy_title(title):
     t = title
     for full, short in SYNONYM:            # synonyms first
-        if full in t and random.random() < 0.25:
+        if full in t and rng.random() < 0.25:
             t = t.replace(full, short)
     for full, short in ABBREV:             # then abbreviations
-        if full in t and random.random() < 0.35:
+        if full in t and rng.random() < 0.35:
             t = t.replace(full, short)
-    r = random.random()
+    r = rng.random()
     if r < 0.10:
         t = t.lower()
     elif r < 0.15:
         t = t.upper()
-    if random.random() < 0.15 and ", " in t:     # drop the team part
+    if rng.random() < 0.15 and ", " in t:     # drop the team part
         t = t.split(", ")[0]
-    if random.random() < 0.10:
+    if rng.random() < 0.10:
         t = t.replace(", ", " - ")
-    if random.random() < 0.05:
+    if rng.random() < 0.05:
         t = "  " + t + " "
     return t
 
@@ -318,9 +319,9 @@ def make_messy(df):
 
 
 def main(version=2, seed=SEED, out=OUT):
-    global V2
+    global V2, rng
     V2 = version == 2
-    random.seed(seed)
+    rng = random.Random(seed)       # private: other code in the process can't disturb it
     out = Path(out)
     out.mkdir(parents=True, exist_ok=True)
     used, rows = set(), []
