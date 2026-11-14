@@ -10,6 +10,71 @@ import pandas as pd
 
 DATA = Path(sys.argv[1]) if len(sys.argv) > 1 else Path("data")
 truth = pd.read_csv(DATA / "truth.csv")
+
+
+def score_hand_made(truth, pred):
+    """Small hand-made answer key (e.g. data/real): score ONLY people with a confirmed
+    manager, split by evidence_type, and list every title the model read wrong."""
+    p = pred.set_index("employee_id")
+    df = truth[truth.true_manager_id.notna()].merge(
+        pred[["employee_id", "level", "function", "pred_manager_id", "confidence",
+              "manager_id", "reason"]], on="employee_id", how="left")
+
+    def row(g, label):
+        given = g.manager_id.notna()
+        right = given & (g.manager_id == g.true_manager_id)
+        prec = f"{right.sum() / given.sum():.0%}" if given.any() else "n/a (no lines drawn)"
+        return {"evidence": label, "people": len(g), "lines drawn": int(given.sum()),
+                "right": int(right.sum()), "wrong": int((given & ~right).sum()),
+                "precision": prec, "coverage": f"{given.mean():.0%}"}
+
+    rows = [row(df, "all")] + [row(g, k) for k, g in df.groupby("evidence_type")]
+    print(f"Scored {len(df)} people with a confirmed manager "
+          f"(of {len(truth)} in the file; the rest have no source and are not scored)\n")
+    print(pd.DataFrame(rows).to_string(index=False))
+    prop = df.pred_manager_id.notna()
+    print(f"\nBelow-threshold guesses (not drawn): {prop.sum() - df.manager_id.notna().sum()}, "
+          f"of which right: {(prop & (df.pred_manager_id == df.true_manager_id)).sum()}")
+
+    # Titles read wrong. What the model needs to draw each confirmed line:
+    #  - the title is parsed (a level AND a function),
+    #  - a company CEO is read as level 1 (top of company),
+    #  - someone who reports to the CEO is read as level 2 (C-level),
+    #  - any other manager is read at a higher level (smaller number) than their report.
+    ceo_rx = r"chief executive officer|\bceo\b"
+    managers = set(df.true_manager_id)
+    is_ceo = {m: bool(pd.Series(p.at[m, "title"]).str.lower().str.contains(ceo_rx).iloc[0])
+              and m not in set(df.employee_id) for m in managers}
+    problems = []
+    for eid in sorted(set(df.employee_id) | managers):
+        r = p.loc[eid]
+        lvl = None if pd.isna(r.level) else int(r.level)
+        why = []
+        if lvl is None or pd.isna(r.function):
+            why.append("could not be parsed (no function)" if lvl else "could not be parsed")
+        if is_ceo.get(eid) and lvl != 1:
+            why.append(f"CEO read as level {lvl}, should be 1 (top)")
+        boss = df.loc[df.employee_id == eid, "true_manager_id"]
+        if len(boss):
+            b = boss.iloc[0]
+            b_lvl = p.at[b, "level"]
+            if is_ceo.get(b) and lvl != 2:
+                why.append(f"reports to the CEO but read as level {lvl}, should be 2")
+            elif not is_ceo.get(b) and not (pd.notna(b_lvl) and lvl and b_lvl < lvl):
+                why.append(f"read at level {lvl}, not below their manager (level {b_lvl:.0f})")
+        if why:
+            problems.append({"employee_id": eid, "title": r.title, "level read": lvl,
+                             "function read": r.function, "problem": "; ".join(why)})
+    print(f"\nTitles read wrong: {len(problems)} of {len(set(df.employee_id) | managers)} "
+          f"titles involved in confirmed lines (people + their managers)")
+    with pd.option_context("display.width", 250, "display.max_colwidth", 70):
+        print(pd.DataFrame(problems).to_string(index=False))
+
+
+if "evidence_type" in truth:                       # hand-made answer key, not the generator's
+    score_hand_made(truth, pd.read_csv(DATA / "predictions.csv"))
+    sys.exit()
+
 for col, default in [("in_dataset", True), ("scenario", "normal"),
                      ("dotted_manager_id", None)]:          # older truth files lack these
     if col not in truth:
