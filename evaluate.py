@@ -19,6 +19,12 @@ def score_hand_made(truth, pred):
     # "level" is read from the title alone; f_level is the level after company-wide
     # corrections (e.g. divisional CEO -> 2), saved when a manager was proposed
     p["level"] = p.f_level.where(p.f_level.notna(), p.level)
+    # Manually added people are never scored, even if they somehow had an answer
+    if "source" in truth:
+        n_added = (truth.source == "manually added").sum()
+        truth = truth[truth.source != "manually added"]
+        if n_added:
+            print(f"Not scored: {n_added} manually added people")
     df = truth[truth.true_manager_id.notna()].merge(
         p.reset_index()[["employee_id", "level", "function", "pred_manager_id", "confidence",
                          "manager_id", "reason"]], on="employee_id", how="left")

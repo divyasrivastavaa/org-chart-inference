@@ -103,7 +103,10 @@ TEAM_STATEMENTS = [
 
 with open(DATA / "employees.csv", encoding="utf-8") as f:
     people = list(csv.DictReader(f))
-by_name = {(p["company_id"], p["full_name"]): p["employee_id"] for p in people}
+# Only public people can get an answer. Manually added people (source = "manually
+# added") have no written source, so they stay blank and are never scored.
+by_name = {(p["company_id"], p["full_name"]): p["employee_id"] for p in people
+           if p.get("source", "public") == "public"}
 
 confirmed = {}
 for cid, person, manager, date, url, quote in LINES:
@@ -116,7 +119,7 @@ for cid, ceo, members, date, url, quote in TEAM_STATEMENTS:
         emp = by_name[(cid, person)]
         confirmed.setdefault(emp, (mgr, "team_statement", quote, url, date))  # explicit wins
 
-cols = ["company_id", "company_name", "employee_id", "full_name", "title",
+cols = ["company_id", "company_name", "employee_id", "full_name", "title", "source",
         "true_manager_id", "evidence_type", "evidence_quote", "source_url", "source_date"]
 with open(DATA / "truth.csv", "w", newline="", encoding="utf-8") as f:
     w = csv.writer(f)
@@ -124,7 +127,7 @@ with open(DATA / "truth.csv", "w", newline="", encoding="utf-8") as f:
     for p in people:
         mgr, kind, quote, url, date = confirmed.get(p["employee_id"], ("", "", "", "", ""))
         w.writerow([p["company_id"], p["company_name"], p["employee_id"], p["full_name"],
-                    p["title"], mgr, kind, quote, url, date])
+                    p["title"], p.get("source", "public"), mgr, kind, quote, url, date])
 kinds = [v[1] for v in confirmed.values()]
 print(f"{len(people)} people: {kinds.count('explicit')} explicit, "
       f"{kinds.count('team_statement')} team_statement, {len(people) - len(confirmed)} unknown")

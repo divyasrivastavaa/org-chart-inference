@@ -289,9 +289,22 @@ COMPANIES = [
     ]),
 ]
 
+# People added by hand (scripts/added_people.csv, see add_people.py --save). They are
+# appended after each company's public people, with source = "manually added", and are
+# never given an answer in truth.csv, so they are never scored.
+ADDED_FILE = Path(__file__).resolve().parent / "added_people.csv"
+added = {}
+if ADDED_FILE.exists():
+    with open(ADDED_FILE, encoding="utf-8") as f:
+        for row in csv.DictReader(f):
+            added.setdefault(row["company_id"].strip(), []).append(row)
+valid_ids = {f"R{i:02d}" for i in range(1, len(COMPANIES) + 1)}
+unknown = set(added) - valid_ids
+assert not unknown, f"added_people.csv has unknown company_id(s): {sorted(unknown)}"
+
 OUT.mkdir(parents=True, exist_ok=True)
 emp_cols = ["company_id", "company_name", "industry", "size", "employee_id",
-            "full_name", "title", "department", "location"]
+            "full_name", "title", "department", "location", "source"]
 with open(OUT / "employees.csv", "w", newline="", encoding="utf-8") as fe, \
      open(OUT / "sources.csv", "w", newline="", encoding="utf-8") as fs:
     we, ws = csv.writer(fe), csv.writer(fs)
@@ -299,11 +312,18 @@ with open(OUT / "employees.csv", "w", newline="", encoding="utf-8") as fe, \
     ws.writerow(["company_id", "employee_id", "full_name", "source_url", "accessed"])
     for i, (name, industry, url, people) in enumerate(COMPANIES, 1):
         cid = f"R{i:02d}"
-        names = [p[0] for p in people]
+        extra = added.get(cid, [])
+        names = [p[0] for p in people] + [a["full_name"].strip() for a in extra]
         assert len(names) == len(set(names)), f"duplicate person in {name}"
+        size = len(names)                     # people listed, public + manually added
         for j, (person, title) in enumerate(people, 1):
             eid = f"{cid}-E{j:03d}"
-            # size = people listed; department/location not published, left blank
-            we.writerow([cid, name, industry, len(people), eid, person, title, "", ""])
+            # department/location not published, left blank
+            we.writerow([cid, name, industry, size, eid, person, title, "", "", "public"])
             ws.writerow([cid, eid, person, url, ACCESSED])
-print(len(COMPANIES), "companies,", sum(len(c[3]) for c in COMPANIES), "people")
+        for j, a in enumerate(extra, len(people) + 1):      # IDs continue after the public ones
+            we.writerow([cid, name, industry, size, f"{cid}-E{j:03d}", a["full_name"].strip(),
+                         a["title"].strip(), a["department"].strip(), "", "manually added"])
+n_added = sum(len(v) for v in added.values())
+print(len(COMPANIES), "companies,", sum(len(c[3]) for c in COMPANIES), "public people,",
+      n_added, "manually added")
