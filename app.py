@@ -37,11 +37,14 @@ def load():
             import generate_data, infer
             generate_data.main()
             infer.main()
-    pred = pd.read_csv("data/predictions.csv")
-    truth = pd.read_csv("data/truth.csv")
+    pred = pd.read_csv("data/predictions.csv", low_memory=False)   # one type per column
+    truth = pd.read_csv("data/truth.csv", low_memory=False)
     # Scoring frame, built exactly like evaluate.py so the numbers match the README:
     # one row per real person who has a manager to find, predictions joined on.
-    scored = truth[truth.in_dataset.astype(bool) & truth.true_manager_id.notna()][
+    keep = truth.in_dataset.astype(bool) & truth.true_manager_id.notna()
+    if "vacant" in truth:                     # leavers.csv: empty positions aren't scored
+        keep &= truth.vacant.astype(str) != "True"
+    scored = truth[keep][
         ["company_id", "employee_id", "true_manager_id"]].merge(
         pred[["employee_id", "pred_manager_id", "confidence"]], on="employee_id", how="left")
     truth = truth[["employee_id", "true_manager_id"]]

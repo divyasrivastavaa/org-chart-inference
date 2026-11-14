@@ -317,7 +317,7 @@ def tree_predict(model, X):
 
 def main(data_dir="data", use_model=True):
     data_dir = Path(data_dir)
-    df = pd.read_csv(data_dir / "employees.csv")
+    df = pd.read_csv(data_dir / "employees.csv", low_memory=False)   # one type per column
     # Duplicates: same person listed twice -> keep one
     df = df.drop_duplicates(subset=["company_id", "full_name", "title", "department",
                                     "location"])
@@ -349,6 +349,9 @@ def main(data_dir="data", use_model=True):
     pred.loc[low & has_edge, "reason"] = "confidence below threshold"
     pred["manager_id"] = pred.pred_manager_id.where(~low)
     pred["threshold"] = threshold
+    if "vacant" in pred:          # leavers.csv used: label people whose manager has left
+        vacant_ids = set(pred.employee_id[pred.vacant.astype(str) == "True"])
+        pred["manager_left"] = pred.manager_id.isin(vacant_ids)
     pred.to_csv(data_dir / "predictions.csv", index=False)
     print(f"{len(pred)} people, {pred.manager_id.notna().mean():.1%} got a manager "
           f"(confidence from {source}, threshold {threshold})")

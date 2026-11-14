@@ -9,7 +9,7 @@ from pathlib import Path
 import pandas as pd
 
 DATA = Path(sys.argv[1]) if len(sys.argv) > 1 else Path("data")
-truth = pd.read_csv(DATA / "truth.csv")
+truth = pd.read_csv(DATA / "truth.csv", low_memory=False)        # one type per column
 
 
 def score_hand_made(truth, pred):
@@ -19,6 +19,9 @@ def score_hand_made(truth, pred):
     # "level" is read from the title alone; f_level is the level after company-wide
     # corrections (e.g. divisional CEO -> 2), saved when a manager was proposed
     p["level"] = p.f_level.where(p.f_level.notna(), p.level)
+    # Vacant positions (leavers.csv) have no person in them, so their own line is not scored
+    if "vacant" in truth:
+        truth = truth[truth.vacant.astype(str) != "True"]
     # Manually added people are never scored, even if they somehow had an answer
     if "source" in truth:
         n_added = (truth.source == "manually added").sum()
@@ -81,7 +84,7 @@ def score_hand_made(truth, pred):
 
 
 if "evidence_type" in truth:                       # hand-made answer key, not the generator's
-    score_hand_made(truth, pd.read_csv(DATA / "predictions.csv"))
+    score_hand_made(truth, pd.read_csv(DATA / "predictions.csv", low_memory=False))
     sys.exit()
 
 for col, default in [("in_dataset", True), ("scenario", "normal"),
@@ -91,7 +94,9 @@ for col, default in [("in_dataset", True), ("scenario", "normal"),
 boss_of = dict(zip(truth.employee_id, truth.true_manager_id))   # full answer key, incl. missing
 
 truth = truth[truth.in_dataset.astype(bool)]           # can't score people we never saw
-pred = pd.read_csv(DATA / "predictions.csv")
+if "vacant" in truth:                                  # leavers.csv: an empty position has
+    truth = truth[truth.vacant.astype(str) != "True"]  # no person, so its line isn't scored
+pred = pd.read_csv(DATA / "predictions.csv", low_memory=False)
 if "rule_confidence" not in pred:                   # older predictions files
     pred["rule_confidence"] = pred.confidence
 df = truth[["employee_id", "true_manager_id", "true_level", "scenario", "dotted_manager_id"]] \

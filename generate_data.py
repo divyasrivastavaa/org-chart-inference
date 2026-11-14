@@ -29,6 +29,8 @@ from pathlib import Path
 
 import pandas as pd
 
+import leavers
+
 SEED = 42
 N_COMPANIES = 500
 OUT = Path("data")
@@ -328,8 +330,9 @@ def main(version=2, seed=SEED, out=OUT):
     for cid in range(1, N_COMPANIES + 1):
         rows.extend(build_company(cid, used))
     truth = pd.DataFrame(rows)
-    truth.to_csv(out / "truth.csv", index=False)
     messy = make_messy(truth)
+    messy, truth = leavers.apply(messy, truth)     # scripts/leavers.csv; no-op when empty
+    truth.to_csv(out / "truth.csv", index=False)
     messy.to_csv(out / "employees.csv", index=False)
     per_co = truth.groupby("company_id").size()
     print(f"v{version}: {truth.company_id.nunique()} companies, {len(truth)} true employees, "

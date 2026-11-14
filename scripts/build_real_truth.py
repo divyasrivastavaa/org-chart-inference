@@ -107,15 +107,25 @@ with open(DATA / "employees.csv", encoding="utf-8") as f:
 # added") have no written source, so they stay blank and are never scored.
 by_name = {(p["company_id"], p["full_name"]): p["employee_id"] for p in people
            if p.get("source", "public") == "public"}
+# Leavers (scripts/leavers.csv): their row is now a vacant position, found by former name.
+#  - a line ABOUT a leaver is dropped (the source described them, and they are gone)
+#  - a line TO a leaver now points at the vacant position (the role still exists)
+left = {(p["company_id"], p["former_holder"]): p["employee_id"] for p in people
+        if p.get("vacant") == "True"}
+by_name.update(left)
 
 confirmed = {}
 for cid, person, manager, date, url, quote in LINES:
+    if (cid, person) in left:
+        continue
     # Fails loudly if a name doesn't match employees.csv exactly
     emp, mgr = by_name[(cid, person)], by_name[(cid, manager)]
     confirmed[emp] = (mgr, "explicit", quote, url, date)
 for cid, ceo, members, date, url, quote in TEAM_STATEMENTS:
     mgr = by_name[(cid, ceo)]
     for person in members:
+        if (cid, person) in left:
+            continue
         emp = by_name[(cid, person)]
         confirmed.setdefault(emp, (mgr, "team_statement", quote, url, date))  # explicit wins
 

@@ -2,6 +2,7 @@
 collected on 2026-11-14 from each company's own website (or official filings).
 Run from anywhere:  python scripts/build_real.py"""
 import csv
+import sys
 from pathlib import Path
 
 ACCESSED = "2026-11-14"
@@ -324,6 +325,16 @@ with open(OUT / "employees.csv", "w", newline="", encoding="utf-8") as fe, \
         for j, a in enumerate(extra, len(people) + 1):      # IDs continue after the public ones
             we.writerow([cid, name, industry, size, f"{cid}-E{j:03d}", a["full_name"].strip(),
                          a["title"].strip(), a["department"].strip(), "", "manually added"])
+# People who left (scripts/leavers.csv): their position becomes a vacant card, and if
+# they joined another company in this data they are added there. No-op when empty.
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+import leavers  # noqa: E402
+import pandas as pd  # noqa: E402
+
+emp = pd.read_csv(OUT / "employees.csv")
+emp_after, _ = leavers.apply(emp)
+if emp_after is not emp:                         # only rewrite when someone actually left
+    emp_after.to_csv(OUT / "employees.csv", index=False)
 n_added = sum(len(v) for v in added.values())
 print(len(COMPANIES), "companies,", sum(len(c[3]) for c in COMPANIES), "public people,",
       n_added, "manually added")
