@@ -32,9 +32,9 @@ def score_hand_made(truth, pred):
     print(f"Scored {len(df)} people with a confirmed manager "
           f"(of {len(truth)} in the file; the rest have no source and are not scored)\n")
     print(pd.DataFrame(rows).to_string(index=False))
-    prop = df.pred_manager_id.notna()
-    print(f"\nBelow-threshold guesses (not drawn): {prop.sum() - df.manager_id.notna().sum()}, "
-          f"of which right: {(prop & (df.pred_manager_id == df.true_manager_id)).sum()}")
+    hidden = df.pred_manager_id.notna() & df.manager_id.isna()     # guessed, not drawn
+    print(f"\nBelow-threshold guesses (not drawn): {hidden.sum()}, "
+          f"of which right: {(hidden & (df.pred_manager_id == df.true_manager_id)).sum()}")
 
     # Titles read wrong. What the model needs to draw each confirmed line:
     #  - the title is parsed (a level AND a function),

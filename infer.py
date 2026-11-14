@@ -81,6 +81,9 @@ def normalise(title):
     t = t.replace(" - ", ", ")
     for pattern, repl in EXPANSIONS:
         t = re.sub(pattern, repl, t)
+    # "Group Chief Information Officer" = "Chief Information Officer". Not "Group Product
+    # Manager": there "group" is part of the role (stripping it made it an IC before).
+    t = re.sub(r"^group (?!product manager)", "", t)
     return re.sub(r"\s+", " ", t).strip()
 
 
@@ -108,6 +111,9 @@ def parse_title(title, department):
         return None, DEPT_TO_FUNCTION.get(department), None, False
     contractor = bool(re.search(CONTRACT, t))
     t = re.sub(CONTRACT, "", t).strip(" ,")
+    # Real titles: "Managing Director and Chief Executive Officer", "Group CEO" (-> "ceo")
+    if "chief executive officer" in t:
+        return 1, "Executive", None, contractor
     if t in C_SUITE:
         return (*C_SUITE[t], None, contractor)
     role, team = (t.split(", ", 1) + [None])[:2]
@@ -125,6 +131,15 @@ def parse_title(title, department):
     function = next((f for word, f in FUNCTION_WORDS if word in role + " "), None)
     if function is None:
         function = DEPT_TO_FUNCTION.get(department)
+    # Real C-level titles not in C_SUITE: "Chief Risk Officer", "Chief Data, Digital and AI
+    # Officer" (whole title checked, because the comma splits off part of the name)
+    if t.startswith("chief ") and t.endswith(" officer"):
+        level, function, team = 2, function or "Executive", None
+    # "Group Executive, Retail Banking", "Group General Counsel", "... Company Secretary"
+    # ("group" is already stripped from t, so check the original title)
+    if (title.strip().lower().startswith("group executive")
+            or "general counsel" in t or "company secretary" in t):
+        level, function, team = 2, function or "Executive", None
     return level, function, (team.strip() if team else None), contractor
 
 
