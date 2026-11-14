@@ -23,6 +23,42 @@ messy data:
 - Confidence is **calibrated**: lines scored ~0.8 are right ~80% of the time, ~0.98 about 97%.
 - Full history of every change and its numbers: [docs/experiments.md](docs/experiments.md).
 
+## Real data
+
+To check the rules outside my own generator, I also tested them on real companies:
+
+- **20 ASX/NZX-listed companies** from 6 industries (banks, telecom, retail, mining, healthcare,
+  tech), with **218 leaders** copied from each company's own leadership page.
+  LinkedIn wasn't used.
+- **43 confirmed reporting lines.** These are the only people whose manager the company states
+  in writing:
+  - **12 explicit**: a press release about that person, e.g. "…reporting to CEO Anthony Miller".
+  - **31 team statements**: an annual report or governance statement that says a named team
+    reports to the CEO.
+
+  Everyone else is left unscored rather than guessed.
+
+| Real data (43 confirmed lines) | Lines drawn | Correct | Coverage |
+|---|---|---|---|
+| Before the title fixes | 0 | – | 0% |
+| After the title fixes | **36** | **36 of 36** | **84%** |
+
+- **Why it started at zero:** real executive titles look different from the synthetic ones.
+  "Managing Director and Chief Executive Officer" was read as a Director, and "Group
+  Executive, Retail Banking" couldn't be read at all, so no CEO was found.
+- **Five small title fixes** solved most of it: CEO titles, a leading "Group ", "Chief …
+  Officer", "Group Executive / General Counsel / Company Secretary", and divisional CEOs such
+  as "Chief Executive Officer, Westpac New Zealand".
+- **The synthetic results above are unchanged** (seed 42 and seed 7: same precision,
+  coverage, wrong lines and Brier score).
+- **Limits:**
+  - The sample is small: one wrong line would cost about 3 points of precision.
+  - Public sources only cover the **top layer** (the CEO and their direct reports), so this
+    doesn't test the deeper levels.
+  - 7 titles are still misread.
+
+Full tables and the list of misread titles: [docs/real_data_results.md](docs/real_data_results.md).
+
 ## The app
 
 - **Front page:** overall precision and coverage, plus a table of all 500 companies (name,
@@ -51,6 +87,44 @@ Screenshots, in case the app is asleep:
 
 **Not placed:** people without a confident manager, each with the reason
 ![Not placed section](docs/images/not_placed.png)
+
+## What if
+
+**Dataset switch:** the sidebar has a **Dataset** choice:
+- **"Synthetic (500 companies)"**, the generated data with the full answer key.
+- **"Real companies (20)"**, the public leadership teams. Here, accuracy is only checked for
+  the 43 people with a confirmed manager. Other drawn lines stay uncoloured, because there's
+  nothing to check them against.
+
+Links remember the choice, e.g. `?data=real&company=R01` opens Commonwealth Bank.
+
+**Dataset switch:** the real companies, with coverage and precision on the confirmed lines
+("None" = no confirmed lines at that company)
+![Dataset switch set to the real companies](docs/images/dataset_switch_real.png)
+
+**"What if…" section:** each company page has this section above the chart. It lets you change
+the company and see how the model reacts:
+
+- **Someone leaves:** pick a person, and optionally the company they join. Click **Simulate
+  leaving**.
+  - Their role stays on the chart as a grey, dashed **vacant card**, e.g. "Chief Security
+    Officer (vacant since Nov 2026)", so the gap is visible instead of hidden.
+  - The people who reported to them now report to the vacant card and are labelled
+    **manager left**.
+  - If they join a company in the data, they appear there too.
+- **Add people:** enter a name, title and (optionally) a department, then click **Add**. The page
+  shows where the new person lands, with the line's confidence, or the reason no manager was
+  drawn.
+- **Reset** clears all changes.
+
+The model is re-run in memory for the affected companies only. Changes are **per visitor**
+(your browser session) and **never saved**, so they don't change the results above or anyone
+else's view.
+
+**"What if" example:** the CEO leaves Commonwealth Bank. *This is a simulation in the app, not
+real news.* The CEO role becomes a vacant card at the top, and the executives under it are
+marked "manager left".
+![What if: the CEO leaves Commonwealth Bank (simulation)](docs/images/whatif_ceo_leaves.png)
 
 ## How I know it works
 
@@ -155,7 +229,30 @@ python train_confidence.py     # retrain the confidence tree (seed 1)
 python generate_data.py --seed 7 --out data/holdout_seed7    # held-out check
 python infer.py data/holdout_seed7
 python evaluate.py data/holdout_seed7
+
+python scripts/build_real.py         # data/real/employees.csv (218 public leaders) + sources.csv
+python scripts/build_real_truth.py   # data/real/truth.csv (the 43 confirmed lines + quotes)
+python infer.py data/real
+python evaluate.py data/real         # scores only the confirmed lines, by evidence type
+
+python scripts/add_people.py R10 scripts/new_people_example.csv          # try: temporary copy
+python scripts/add_people.py R10 scripts/new_people_example.csv --save   # keep for good
 ```
+
+Changes that go into the data files (the app's "What if" section never writes files):
+
+- **`scripts/add_people.py`** adds people from a small CSV (`full_name, title, department`) to
+  one company and prints who the model says they report to.
+  - Without `--save`, it works on a copy in `data/real_added/`.
+  - With `--save`, it adds them to `scripts/added_people.csv` and rebuilds the real data.
+- **`scripts/added_people.csv`** lists people added by hand. They're added to the real data
+  as `source = "manually added"` and are **never scored**.
+- **`scripts/leavers.csv`** (`company_id, full_name, left_date, new_company`, optional `note`)
+  lists people who left. When the data is built, each leaver's role becomes a vacant card.
+  Their reports are marked "manager left", and the person is added to their new company if
+  it's in the data.
+
+Both CSV files are kept **empty** in this repo, so the results above stay exactly as reported.
 
 | File | What it does |
 |---|---|
@@ -163,8 +260,14 @@ python evaluate.py data/holdout_seed7
 | `infer.py` | title parsing, manager search, abstentions, tree confidence |
 | `train_confidence.py` | trains the confidence tree on a separate dataset |
 | `evaluate.py` | scores predictions against the answer key |
-| `app.py` | Streamlit app: company table, company page |
+| `app.py` | Streamlit app: dataset switch, company table, company page, "What if" |
 | `org_chart.py` | the expandable org chart (plain HTML/CSS/JavaScript) |
+| `whatif.py` | the app's "What if" changes, re-run in memory |
+| `leavers.py` | turns leavers into vacant cards (used by both data builders and "What if") |
+| `scripts/build_real.py`, `scripts/build_real_truth.py` | real leadership data and its confirmed lines |
+| `scripts/add_people.py` | add people to a real company (temporary, or `--save`) |
+| `scripts/added_people.csv`, `scripts/leavers.csv` | hand-added people and leavers (empty) |
+| `docs/real_data_results.md` | real-data results, before/after the title fixes |
 | `models/` | the trained tree (JSON + readable rules) |
 | `docs/experiments.md` | every experiment and its numbers |
 | `docs/research_models.md` | notes on decision models and GLiNER |
