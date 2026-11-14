@@ -19,16 +19,20 @@ def build_payload(view, show_truth):
     for r in view.itertuples():
         mgr = r.manager_id if isinstance(r.manager_id, str) and r.manager_id in ids else None
         title = r.title.strip() if isinstance(r.title, str) and r.title.strip() else "(no title)"
-        vacant = str(getattr(r, "vacant", False)) == "True"     # leavers.csv
+        vacant = str(getattr(r, "vacant", False)) == "True"     # leavers.csv / what-if
         if vacant:                       # "Chief Security Officer (vacant since Nov 2026, ...)"
             title = f"{title} ({r.vacancy_note})"
+        # Can this line be checked? Not for empty positions, people added by hand, or real
+        # people without a written source (app.py sets "checkable"; default yes)
+        checkable = str(getattr(r, "checkable", True)) == "True" and not vacant
         nodes[r.employee_id] = {
             "n": r.full_name, "t": title,
             "l": None if pd.isna(r.level) else int(r.level),
             "m": mgr,
             "c": round(float(r.confidence), 2) if mgr else None,
-            "ok": bool(r.manager_id == r.true_manager_id) if (show_truth and mgr and not vacant)
-            else None,                   # an empty position is not scored
+            "ok": bool(r.manager_id == r.true_manager_id) if (show_truth and mgr and checkable)
+            else None,
+            "u": bool(show_truth and mgr and not checkable),     # drawn, but not checkable
             "why": r.reason if isinstance(r.reason, str) else "",
             "v": vacant,
             "k": [], "tot": 0,
@@ -65,7 +69,8 @@ def build_payload(view, show_truth):
     unplaced = sorted([p for p, n in nodes.items() if not n["m"] and n["l"] != 1],
                       key=lambda p: (-nodes[p]["tot"], sort_key(p)))
     return {"nodes": nodes, "roots": roots, "unplaced": unplaced, "truth": bool(show_truth),
-            "vacancies": any(n["v"] for n in nodes.values())}
+            "vacancies": any(n["v"] for n in nodes.values()),
+            "unchecked": any(n["u"] for n in nodes.values())}
 
 
 def render_html(view, show_truth):
@@ -96,7 +101,7 @@ TEMPLATE = r"""
   .card.bad { background:var(--bad-bg); border-color:var(--bad-edge); }
   .card.vacant { background:#f1f2f4; border:1.5px dashed #8a93a3; box-shadow:none; }
   .card.vacant .name { color:var(--muted); font-style:italic; }
-  .card.vacant .title { max-height:3.8em; }          /* room for the "(vacant since ...)" note */
+  .card.vacant .title { max-height:none; }           /* show the whole "(vacant since ...)" note */
   .card.vacant .avatar { background:#b8bec9 !important; }
   .left { color:#a14b00; font-weight:600; }
   .card.open { outline:2px solid var(--accent); outline-offset:1px; }
@@ -137,7 +142,8 @@ const fmt = n => n.toLocaleString("en-US");
 if (D.truth) document.getElementById("legend").innerHTML =
   'Line to manager:<span class="sw" style="background:var(--ok-bg);border-color:var(--ok-edge)"></span>matches the answer key' +
   '<span class="sw" style="background:var(--bad-bg);border-color:var(--bad-edge)"></span>wrong' +
-  '<span class="sw" style="background:#fff;border-color:var(--edge)"></span>no manager drawn';
+  '<span class="sw" style="background:#fff;border-color:var(--edge)"></span>no manager drawn' +
+  (D.unchecked ? ' or line not checkable (no written source)' : '');
 if (D.vacancies) document.getElementById("legend").innerHTML +=
   '<span class="sw" style="background:#f1f2f4;border:1.5px dashed #8a93a3"></span>vacant position (person left)';
 document.getElementById("np-hint").textContent =

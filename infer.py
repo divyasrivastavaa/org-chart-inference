@@ -315,9 +315,10 @@ def tree_predict(model, X):
     return out
 
 
-def main(data_dir="data", use_model=True):
-    data_dir = Path(data_dir)
-    df = pd.read_csv(data_dir / "employees.csv", low_memory=False)   # one type per column
+def predict(df, use_model=True):
+    """Infer managers for the employee rows in df (one or many companies), in memory.
+    Companies are independent, so running one company alone gives the same answer as
+    running the whole file. Returns (predictions, threshold, confidence source)."""
     # Duplicates: same person listed twice -> keep one
     df = df.drop_duplicates(subset=["company_id", "full_name", "title", "department",
                                     "location"])
@@ -332,6 +333,9 @@ def main(data_dir="data", use_model=True):
         rows.extend(infer_company(co))
     pred = df.merge(pd.DataFrame(rows), on="employee_id")
     pred = add_span_feature(pred)
+    for f in FEATURES:            # a company where nobody got a candidate has no f_* columns
+        if f not in pred:
+            pred[f] = None
 
     has_edge = pred.pred_manager_id.notna()
     if use_model and MODEL_PATH.exists():
@@ -352,6 +356,13 @@ def main(data_dir="data", use_model=True):
     if "vacant" in pred:          # leavers.csv used: label people whose manager has left
         vacant_ids = set(pred.employee_id[pred.vacant.astype(str) == "True"])
         pred["manager_left"] = pred.manager_id.isin(vacant_ids)
+    return pred, threshold, source
+
+
+def main(data_dir="data", use_model=True):
+    data_dir = Path(data_dir)
+    df = pd.read_csv(data_dir / "employees.csv", low_memory=False)   # one type per column
+    pred, threshold, source = predict(df, use_model)
     pred.to_csv(data_dir / "predictions.csv", index=False)
     print(f"{len(pred)} people, {pred.manager_id.notna().mean():.1%} got a manager "
           f"(confidence from {source}, threshold {threshold})")
