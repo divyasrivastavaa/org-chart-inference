@@ -20,14 +20,16 @@ Checks how the inference rules, built on synthetic data, handle real leadership 
 2. A leading "Group " is removed before reading the title ("Group Chief Information Officer" is read as "Chief Information Officer"). "Group Product Manager" is the exception, because there "Group" is part of the role.
 3. A title starting with "Chief" and ending with "Officer" is level 2 (C-level).
 4. "Group Executive, X", "General Counsel" and "Company Secretary" titles are level 2.
+5. **Divisional CEOs:** a CEO title followed by a comma or "of X" is level 2, e.g. "Chief Executive Officer, Westpac New Zealand" or "…of Macquarie Bank Limited".
+   - **Exception:** if X is the company's own name, it is still the main CEO, e.g. "…Chief Executive Officer, Wesfarmers" or "…of Macquarie Group Limited".
 
 ## Real data
 
-| Evidence | People | Precision before | Precision after | Coverage before | Coverage after |
-|---|---|---|---|---|---|
-| explicit | 12 | n/a (no lines drawn) | 100% (5 of 5) | 0% | 42% |
-| team_statement | 31 | n/a (no lines drawn) | 100% (19 of 19) | 0% | 61% |
-| **All** | **43** | n/a (no lines drawn) | **100% (24 of 24)** | **0%** | **56%** |
+| Evidence | People | Precision before | Precision after fixes 1–4 | Precision after fix 5 | Coverage before | Coverage after fixes 1–4 | Coverage after fix 5 |
+|---|---|---|---|---|---|---|---|
+| explicit | 12 | n/a (no lines drawn) | 100% (5 of 5) | 100% (10 of 10) | 0% | 42% | 83% |
+| team_statement | 31 | n/a (no lines drawn) | 100% (19 of 19) | 100% (26 of 26) | 0% | 61% | 84% |
+| **All** | **43** | n/a (no lines drawn) | 100% (24 of 24) | **100% (36 of 36)** | **0%** | 56% | **84%** |
 
 Effect of each fix (all 43):
 
@@ -38,8 +40,9 @@ Effect of each fix (all 43):
 | 2. Remove "Group " | 5 | 5 | 12% |
 | 3. "Chief … Officer" | 6 | 6 | 14% |
 | 4. Group Executive / General Counsel / Company Secretary | 24 | 24 | 56% |
+| 5. Divisional CEOs | 36 | 36 | 84% |
 
-**Caution:** 24 lines is a small sample, so a single wrong line would lower precision by about 4 points.
+**Caution:** 36 lines is a small sample, so a single wrong line would lower precision by about 3 points.
 
 ## Synthetic data (regression check)
 
@@ -48,9 +51,11 @@ Effect of each fix (all 43):
 | Seed 42 (app data) | 96.3% | 96.3% | 58.7% | 58.7% | 3,465 (unchanged) |
 | Seed 7 (held out) | 96.3% | 96.3% | 60.6% | 60.6% | 3,399 (unchanged) |
 
-The Brier score is also unchanged (0.0433 on seed 42, 0.0420 on seed 7), so the fixes did not affect the synthetic results.
+The Brier score is also unchanged (0.0433 on seed 42, 0.0420 on seed 7), so all five fixes left the synthetic results unchanged.
 
 ## Titles still read wrong
+
+These 7 titles block the remaining 7 confirmed lines.
 
 Level 1 = CEO. Level 2 = reports to the CEO. Level 4 = Director. Level 7 = the model's default when it doesn't recognise a title.
 
@@ -59,26 +64,12 @@ Level 1 = CEO. Level 2 = reports to the CEO. Level 4 = Director. Level 7 = the m
 | Chief Executive, Business & Wealth | Westpac | 7 (not parsed) | 2 |
 | Chief Executive, Westpac Institutional Bank | Westpac | 7 (not parsed) | 2 |
 | Chief Executive, Consumer | Westpac | 7 (not parsed) | 2 |
-| Chief Executive Officer, Westpac New Zealand | Westpac | 1 | 2 |
 | Group Chief Financial Officer and Group Executive, Strategy | NAB | 7 | 2 |
 | Chief Risk Officer and Head of Risk Management Group | Macquarie | 4 (not parsed) | 2 |
 | Managing Director, Woolworths Retail | Woolworths | 4 (not parsed) | 2 |
 | Managing Director, US | Xero | 4 (not parsed) | below its manager, the Chief Business Officer |
 
-### Divisional CEOs read as a second CEO
-
-Fix 1 also reads divisional CEO titles as level 1. That leaves 4 companies with two "CEOs", and the model then correctly abstains for everyone who reports to a CEO:
-
-| Company | Titles read as CEO |
-|---|---|
-| Westpac | Managing Director and Chief Executive Officer · Chief Executive Officer, Westpac New Zealand |
-| ANZ | Group Chief Executive Officer · Group Executive and Chief Executive Officer of New Zealand |
-| Macquarie | Managing Director and Chief Executive Officer of Macquarie Group Limited · …of Macquarie Bank Limited |
-| Fortescue | Chief Executive Officer, Fortescue Metals · Chief Executive Officer, Growth and Energy |
-
-This blocks all 12 confirmed Westpac lines, 3 at ANZ and 1 at Macquarie.
-
-**Possible next fix:** treat a CEO title followed by a comma or "of X" as a divisional CEO (level 2). Like any rule change, it must be re-checked on all synthetic datasets.
+**Fortescue (not scored):** Fortescue has two divisional CEOs ("…, Fortescue Metals" and "…, Growth and Energy") and no title the model reads as its overall CEO, so nobody there is linked to a CEO. That is the safe outcome: no line is better than a guessed one.
 
 ## How to reproduce
 

@@ -16,9 +16,12 @@ def score_hand_made(truth, pred):
     """Small hand-made answer key (e.g. data/real): score ONLY people with a confirmed
     manager, split by evidence_type, and list every title the model read wrong."""
     p = pred.set_index("employee_id")
+    # "level" is read from the title alone; f_level is the level after company-wide
+    # corrections (e.g. divisional CEO -> 2), saved when a manager was proposed
+    p["level"] = p.f_level.where(p.f_level.notna(), p.level)
     df = truth[truth.true_manager_id.notna()].merge(
-        pred[["employee_id", "level", "function", "pred_manager_id", "confidence",
-              "manager_id", "reason"]], on="employee_id", how="left")
+        p.reset_index()[["employee_id", "level", "function", "pred_manager_id", "confidence",
+                         "manager_id", "reason"]], on="employee_id", how="left")
 
     def row(g, label):
         given = g.manager_id.notna()

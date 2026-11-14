@@ -167,6 +167,14 @@ def fix_with_company_context(co):
     mgr = co[co.level == 5]
     counts = mgr.groupby(["function", "team"]).employee_id.transform("count")
     co.loc[counts[counts > MAX_MANAGERS_PER_TEAM].index, "level"] = 7
+    # 3. Divisional CEOs: "Chief Executive Officer, Westpac New Zealand" or "... of Macquarie
+    #    Bank Limited" run a division (level 2). Exception: when the part after the comma /
+    #    "of" is the company's own name ("..., Wesfarmers"), it is the main CEO (level 1).
+    def plain(s):
+        return s.str.lower().str.replace(r"\b(limited|ltd)\b\.?", "", regex=True).str.strip()
+    after = co.title.str.lower().str.extract(r"chief executive officer(?:,| of) (.+)$")[0]
+    divisional = (co.level == 1) & after.notna() & (plain(after) != plain(co.company_name))
+    co.loc[divisional, "level"] = 2
     return co
 
 
