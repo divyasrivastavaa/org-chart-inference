@@ -1,5 +1,8 @@
 """Write data/real/employees.csv and data/real/sources.csv from leadership lists
 collected on 2026-11-14 from each company's own website (or official filings).
+sources.csv has one row per source: dataset, company_id, company_name, url,
+what_it_shows, date_checked, licence. Rows of other datasets (UK organograms, written by
+build_uk.py) are kept.
 Run from anywhere:  python scripts/build_real.py"""
 import csv
 import sys
@@ -304,15 +307,28 @@ unknown = set(added) - valid_ids
 assert not unknown, f"added_people.csv has unknown company_id(s): {sorted(unknown)}"
 
 OUT.mkdir(parents=True, exist_ok=True)
-emp_cols = ["company_id", "company_name", "industry", "size", "employee_id",
+SRC_COLS = ["dataset", "company_id", "company_name", "url", "what_it_shows", "date_checked",
+            "licence"]
+# Keep every row this script doesn't write itself (UK rows from build_uk.py, answer-key
+# rows from build_real_truth.py), so the scripts can run in any order.
+other_sources = []
+if (OUT / "sources.csv").exists():
+    with open(OUT / "sources.csv", encoding="utf-8") as f:
+        other_sources = [r for r in csv.DictReader(f)
+                         if not (r.get("dataset") == "ASX/NZX leadership"
+                                 and r.get("what_it_shows", "").startswith("Leadership team"))]
+emp_cols =["company_id", "company_name", "industry", "size", "employee_id",
             "full_name", "title", "department", "location", "source"]
 with open(OUT / "employees.csv", "w", newline="", encoding="utf-8") as fe, \
      open(OUT / "sources.csv", "w", newline="", encoding="utf-8") as fs:
     we, ws = csv.writer(fe), csv.writer(fs)
     we.writerow(emp_cols)
-    ws.writerow(["company_id", "employee_id", "full_name", "source_url", "accessed"])
+    ws.writerow(SRC_COLS)
     for i, (name, industry, url, people) in enumerate(COMPANIES, 1):
         cid = f"R{i:02d}"
+        ws.writerow(["ASX/NZX leadership", cid, name, url,
+                     f"Leadership team: names and job titles of {len(people)} leaders",
+                     ACCESSED, ""])
         extra = added.get(cid, [])
         names = [p[0] for p in people] + [a["full_name"].strip() for a in extra]
         assert len(names) == len(set(names)), f"duplicate person in {name}"
@@ -321,10 +337,10 @@ with open(OUT / "employees.csv", "w", newline="", encoding="utf-8") as fe, \
             eid = f"{cid}-E{j:03d}"
             # department/location not published, left blank
             we.writerow([cid, name, industry, size, eid, person, title, "", "", "public"])
-            ws.writerow([cid, eid, person, url, ACCESSED])
         for j, a in enumerate(extra, len(people) + 1):      # IDs continue after the public ones
             we.writerow([cid, name, industry, size, f"{cid}-E{j:03d}", a["full_name"].strip(),
                          a["title"].strip(), a["department"].strip(), "", "manually added"])
+    ws.writerows([[r.get(c, "") for c in SRC_COLS] for r in other_sources])
 # People who left (scripts/leavers.csv): their position becomes a vacant card, and if
 # they joined another company in this data they are added there. No-op when empty.
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))

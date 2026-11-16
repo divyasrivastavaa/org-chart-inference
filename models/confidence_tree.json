@@ -14,8 +14,8 @@
   "f_company_size",
   "f_span_ratio"
  ],
- "decision_threshold": 0.8,
- "cost_of_wrong_edge": 4,
+ "decision_threshold": 0.7,
+ "cost_of_wrong_edge": 2.3333,
  "max_depth": 4,
  "trained_on": "v2 seed 1, 400 companies (by company split)",
  "children_left": [

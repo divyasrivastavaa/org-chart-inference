@@ -10,6 +10,7 @@ evidence_type:
                   that a defined group reports to the CEO (applied ONLY to people that
                   group clearly covers). An explicit source always wins over a team one.
 Run after build_real.py:  python scripts/build_real_truth.py
+It also adds one row per answer-key source to data/real/sources.csv.
 """
 import csv
 from pathlib import Path
@@ -141,3 +142,45 @@ with open(DATA / "truth.csv", "w", newline="", encoding="utf-8") as f:
 kinds = [v[1] for v in confirmed.values()]
 print(f"{len(people)} people: {kinds.count('explicit')} explicit, "
       f"{kinds.count('team_statement')} team_statement, {len(people) - len(confirmed)} unknown")
+
+
+# ---- sources.csv (written by build_real.py): add one row per answer-key source, e.g.
+#      "Confirms Kate Dee reports to Anthony Miller (published 2025-04-02)".
+#      date_checked = the company's collection date from build_real.py (2026-11-14, the
+#      date of the git commits that added the companies and these sources).
+def names(xs):
+    return xs[0] if len(xs) == 1 else ", ".join(xs[:-1]) + " and " + xs[-1]
+
+
+company = {p["company_id"]: p["company_name"] for p in people}
+covered = {}                      # (company, url, manager, date) -> people it confirms
+for cid, person, manager, date, url, quote in LINES:
+    if (cid, person) not in left:
+        covered.setdefault((cid, url, manager, date), []).append(person)
+for cid, ceo, members, date, url, quote in TEAM_STATEMENTS:
+    covered.setdefault((cid, url, ceo, date), []).extend(
+        m for m in members if (cid, m) not in left)
+SRC_COLS = ["dataset", "company_id", "company_name", "url", "what_it_shows", "date_checked",
+            "licence"]
+COLLECTED = "2026-11-14"     # = ACCESSED in build_real.py, used if its rows aren't there yet
+header, rows = SRC_COLS, []
+if (DATA / "sources.csv").exists():                 # keep everyone else's rows
+    with open(DATA / "sources.csv", encoding="utf-8") as f:
+        reader = csv.DictReader(f)
+        header = reader.fieldnames
+        rows = [r for r in reader if not r["what_it_shows"].startswith("Confirms ")]  # re-runs
+checked = {r["company_id"]: r["date_checked"] for r in rows
+           if r["dataset"] == "ASX/NZX leadership"}  # company_id -> its leadership page's date
+for (cid, url, manager, date), who in covered.items():
+    if who:
+        verb = "reports" if len(who) == 1 else "report"
+        rows.append({"dataset": "ASX/NZX leadership", "company_id": cid,
+                     "company_name": company[cid], "url": url,
+                     "what_it_shows": f"Confirms {names(who)} {verb} to {manager} "
+                                      f"(published {date})",
+                     "date_checked": checked.get(cid, COLLECTED), "licence": ""})
+with open(DATA / "sources.csv", "w", newline="", encoding="utf-8") as f:
+    w = csv.DictWriter(f, fieldnames=header)
+    w.writeheader()
+    w.writerows(rows)
+print(f"sources.csv: {sum(1 for w in covered.values() if w)} answer-key sources added")

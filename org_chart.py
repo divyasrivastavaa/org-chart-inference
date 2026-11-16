@@ -22,9 +22,15 @@ def build_payload(view, show_truth):
         vacant = str(getattr(r, "vacant", False)) == "True"     # leavers.csv / what-if
         if vacant:                       # "Chief Security Officer (vacant since Nov 2026, ...)"
             title = f"{title} ({r.vacancy_note})"
+        left = str(getattr(r, "left", False)) == "True"         # what-if: left the company
+        moving = getattr(r, "left_to", "")
+        tag = getattr(r, "tag", None)                            # "manually added", ...
+        if getattr(r, "judge", None) == "Gemini":                # what-if: placed by Gemini
+            tag = (tag + " · " if isinstance(tag, str) else "") + "placed by Gemini"
+        was_under = getattr(r, "was_under", None)                # their manager left
         # Can this line be checked? Not for empty positions, people added by hand, or real
         # people without a written source (app.py sets "checkable"; default yes)
-        checkable = str(getattr(r, "checkable", True)) == "True" and not vacant
+        checkable = str(getattr(r, "checkable", True)) == "True" and not vacant and not left
         nodes[r.employee_id] = {
             "n": r.full_name, "t": title,
             "l": None if pd.isna(r.level) else int(r.level),
@@ -35,6 +41,11 @@ def build_payload(view, show_truth):
             "u": bool(show_truth and mgr and not checkable),     # drawn, but not checkable
             "why": r.reason if isinstance(r.reason, str) else "",
             "v": vacant,
+            "lf": ("Left → " + moving if isinstance(moving, str) and moving else "Left")
+            if left else None,
+            "tag": tag if isinstance(tag, str) else "",
+            "wu": was_under if isinstance(was_under, str) else "",
+            "it": str(getattr(r, "interim", False)) == "True",   # interim: under the CEO
             "k": [], "tot": 0,
         }
     for pid, n in nodes.items():
@@ -70,6 +81,7 @@ def build_payload(view, show_truth):
                       key=lambda p: (-nodes[p]["tot"], sort_key(p)))
     return {"nodes": nodes, "roots": roots, "unplaced": unplaced, "truth": bool(show_truth),
             "vacancies": any(n["v"] for n in nodes.values()),
+            "leavers": any(n["lf"] for n in nodes.values()),
             "unchecked": any(n["u"] for n in nodes.values())}
 
 
@@ -81,8 +93,8 @@ def render_html(view, show_truth):
 TEMPLATE = r"""
 <style>
   :root { --line:#9aa3b2; --ink:#1f2937; --muted:#6b7280; --card:#ffffff; --edge:#d6dae1;
-          --ok-bg:#e9f7ef; --ok-edge:#3f9b62; --bad-bg:#fdecec; --bad-edge:#cc4b4b;
-          --pill:#eef1f6; --accent:#2E6FD8; }
+          --ok-bg:#e9f7ef; --ok-edge:#3f9b62;
+          --pill:#eef1f6; --accent:#2E6FD8; --none-bg:#f1f2f4; }
   * { box-sizing:border-box; }
   body { margin:0; font-family:"Source Sans Pro",-apple-system,"Segoe UI",Roboto,sans-serif;
          color:var(--ink); background:#fff; }
@@ -98,7 +110,8 @@ TEMPLATE = r"""
           padding:9px 10px 8px; display:flex; gap:9px; align-items:flex-start;
           box-shadow:0 1px 2px rgba(0,0,0,.05); }
   .card.ok { background:var(--ok-bg); border-color:var(--ok-edge); }
-  .card.bad { background:var(--bad-bg); border-color:var(--bad-edge); }
+  .card.none { background:var(--none-bg); }               /* no manager drawn */
+  .card.gone { opacity:.5; border-style:dashed; box-shadow:none; }   /* left the company */
   .card.vacant { background:#f1f2f4; border:1.5px dashed #8a93a3; box-shadow:none; }
   .card.vacant .name { color:var(--muted); font-style:italic; }
   .card.vacant .title { max-height:none; }           /* show the whole "(vacant since ...)" note */
@@ -137,13 +150,17 @@ TEMPLATE = r"""
 const D = __DATA__;
 const N = D.nodes;
 const state = { main: [], np: [] };            // expanded path per section
+// Open the CEO's team straight away (only that one level; deeper levels stay closed).
+// With two people at the top, the first one who has a team is opened.
+const ceo = D.roots.find(id => N[id].k.length);
+if (ceo) state.main.push(ceo);
 const fmt = n => n.toLocaleString("en-US");
 
-if (D.truth) document.getElementById("legend").innerHTML =
-  'Line to manager:<span class="sw" style="background:var(--ok-bg);border-color:var(--ok-edge)"></span>matches the answer key' +
-  '<span class="sw" style="background:var(--bad-bg);border-color:var(--bad-edge)"></span>wrong' +
-  '<span class="sw" style="background:#fff;border-color:var(--edge)"></span>no manager drawn' +
-  (D.unchecked ? ' or line not checkable (no written source)' : '');
+document.getElementById("legend").innerHTML = 'Line to manager:' +
+  (D.truth ? '<span class="sw" style="background:var(--ok-bg);border-color:var(--ok-edge)"></span>matches the answer key' : '') +
+  '<span class="sw" style="background:var(--none-bg);border-color:var(--edge)"></span>no manager drawn';
+if (D.leavers) document.getElementById("legend").innerHTML +=
+  '<span class="sw" style="background:#fff;border:1px dashed var(--edge);opacity:.5"></span>left the company';
 if (D.vacancies) document.getElementById("legend").innerHTML +=
   '<span class="sw" style="background:#f1f2f4;border:1.5px dashed #8a93a3"></span>vacant position (person left)';
 document.getElementById("np-hint").textContent =
@@ -164,14 +181,23 @@ function esc(s) {
 function card(id, sec, rowIdx) {
   const n = N[id], el = document.createElement("div");
   const open = state[sec][rowIdx] === id;
-  el.className = "card" + (n.ok === true ? " ok" : n.ok === false ? " bad" : "") +
+  const unplaced = !n.m && n.l !== 1 && !n.lf && !n.v;
+  el.className = "card" + (n.ok === true ? " ok" : "") +     // wrong lines: no colour
+                 (unplaced ? " none" : "") + (n.lf ? " gone" : "") +
                  (n.v ? " vacant" : "") + (open ? " open" : "");
   el.dataset.id = id;
   let meta;
-  if (n.m) meta = "line confidence " + n.c.toFixed(2);
+  if (n.lf) meta = '<span class="left">' + esc(n.lf) + '</span>';
+  else if (n.m) meta = "line confidence " + n.c.toFixed(2);
   else if (n.l === 1) meta = "top of company";
+  else if (n.wu) meta = "waiting for a new manager";
   else meta = n.why ? "not placed: " + esc(n.why) : "not placed";
-  if (n.m && N[n.m].v) meta = '<span class="left">manager left</span> · ' + meta;
+  if (n.wu && n.it && n.m)
+    meta = '<span class="left">interim</span> · reports to CEO · was under ' + esc(n.wu) +
+           " · " + meta;
+  else if (n.wu) meta = '<span class="left">manager left</span> · was under ' + esc(n.wu) + " · " + meta;
+  else if (n.m && N[n.m].v) meta = '<span class="left">manager left</span> · ' + meta;
+  if (n.tag) meta += " · " + esc(n.tag);
   el.innerHTML =
     '<div class="avatar" style="background:' + colour(n.n) + '">' +
     (n.v ? "?" : esc(initials(n.n))) + '</div>' +

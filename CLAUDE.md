@@ -32,13 +32,23 @@ training seed 1). `models/` IS committed (the hosted app needs it).
 - Retrain confidence: `python train_confidence.py` (`python infer.py --rules` = no tree)
 - App: `streamlit run app.py`
 
-## Current baseline (threshold 0.75), see docs/experiments.md
-Decision tree confidence, threshold 0.8 (wrong edge = 4x a missing edge):
-- v2 data (default, seed 42): precision 96.3%, coverage 58.7%, 3,465 wrong edges, Brier 0.0433.
-- v2 held-out (`--seed 7 --out data/holdout_seed7`): 96.3% / 60.6%, Brier 0.0420.
-- Weakest: shared-manager teams (63% precision), manager missing from the data.
-Any change must be reported against this baseline, on all three datasets,
+## Current baseline, see docs/experiments.md (E5)
+Decision tree confidence, threshold 0.7 (wrong edge ~2.3x a missing edge):
+- v2 data (default, seed 42): precision 95.2%, coverage 62.7%, 4,727 wrong edges, Brier 0.0433.
+- v2 held-out (`--seed 7 --out data/holdout_seed7`): 95.4% / 63.7%, Brier 0.0420.
+- Real data (`data/real`, 43 confirmed lines): 36 of 36 right, coverage 84%.
+- UK organograms (`data/uk`, E6): test half 85.0% / 25.3%, tune half 83.6% / 12.6%
+  (tune = U02 U03 U07 U09 U10 U11; never tune on the test half).
+  Rebuild: `python scripts/build_uk.py`, `python infer.py data/uk`, `python evaluate.py data/uk`.
+- Weakest: shared-manager teams (59% precision), manager missing from the data.
+Any change must be reported against this baseline, on all four datasets,
 and logged in docs/experiments.md.
+
+## Gemini judge
+`judge_gemini.py` (optional second judge). Key: st.secrets["GEMINI_API_KEY"] in
+`.streamlit/secrets.toml` (git-ignored; NEVER print, log or commit it). Model: GEMINI_MODEL
+secret or `gemini-3.5-flash-lite`. Comparison: `python scripts/compare_judges.py` (cached in
+data/gemini_cache.json) -> docs/judge_comparison.md.
 
 ## Rules for working in this repo
 - The user is new to Git/terminals: explain each change, then give exact git commands.

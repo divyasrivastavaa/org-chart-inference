@@ -30,6 +30,7 @@ CONTRACT = r"\(contractor\)|^freelance |^contract |,? *- *contract$|, contract$"
 
 C_SUITE = {  # exact cleaned title -> (level, function)
     "ceo": (1, "Executive"), "chief executive officer": (1, "Executive"),
+    "chief executive": (1, "Executive"),          # UK agencies: just "Chief Executive"
     "managing director": (1, "Executive"),
     "cto": (2, "Engineering"), "chief technology officer": (2, "Engineering"),
     "chief technical officer": (2, "Engineering"),
@@ -114,6 +115,10 @@ def parse_title(title, department):
     # Real titles: "Managing Director and Chief Executive Officer", "Group CEO" (-> "ceo")
     if "chief executive officer" in t:
         return 1, "Executive", None, contractor
+    # UK civil service: the Permanent Secretary heads a department (a "Second Permanent
+    # Secretary" is one level below, handled further down)
+    if "permanent secretary" in t and not t.startswith("second "):
+        return 1, "Executive", None, contractor
     if t in C_SUITE:
         return (*C_SUITE[t], None, contractor)
     role, team = (t.split(", ", 1) + [None])[:2]
@@ -131,6 +136,15 @@ def parse_title(title, department):
     function = next((f for word, f in FUNCTION_WORDS if word in role + " "), None)
     if function is None:
         function = DEPT_TO_FUNCTION.get(department)
+    # An organisation's own unit name (e.g. UK "Customer Services Group") is not one of our
+    # function names, but it groups people the same way: use it as the function.
+    # (Benchmark departments are all standard names or blank, so they are not affected.)
+    if isinstance(department, str) and department.strip() \
+            and department not in DEPT_TO_FUNCTION:
+        function = department.strip()
+    # UK civil service ladder: Director General / Second Permanent Secretary = level 2
+    if re.match(r"(director general|second permanent secretary)\b", t):
+        level = 2
     # Real C-level titles not in C_SUITE: "Chief Risk Officer", "Chief Data, Digital and AI
     # Officer" (whole title checked, because the comma splits off part of the name)
     if t.startswith("chief ") and t.endswith(" officer"):
@@ -175,6 +189,13 @@ def fix_with_company_context(co):
     after = co.title.str.lower().str.extract(r"chief executive officer(?:,| of) (.+)$")[0]
     divisional = (co.level == 1) & after.notna() & (plain(after) != plain(co.company_name))
     co.loc[divisional, "level"] = 2
+    # 4. UK civil service: where an organisation has Deputy Directors / Directors General,
+    #    a plain "Director" is one step above a Deputy Director (level 3, like a VP).
+    #    Deputy / Assistant Directors and "Head of" stay at level 4.
+    raw = co.title.fillna("").str.lower()
+    if raw.str.contains(r"\b(?:deputy director|director general|permanent secretary)\b").any():
+        plain_director = (co.level == 4) & ~raw.str.contains(r"\b(?:deputy|assistant|head of)\b")
+        co.loc[plain_director, "level"] = 3
     return co
 
 
@@ -285,6 +306,23 @@ FEATURES = ["f_level", "f_manager_level", "f_gap", "f_empty_skips", "f_team_skip
             "f_unknown_in_function", "f_function_size", "f_company_size", "f_span_ratio"]
 RULE_THRESHOLD = 0.75
 
+# Lines whose function came from an organisation's own unit name (UK organograms): the
+# tree above was trained on benchmark data and is overconfident there (it gave every UK
+# line 0.95+, but only 69% were right). Instead, use the share of lines that were right
+# per step (person's level -> manager's level), measured ONLY on the UK tune half
+# (U02, U03, U07, U09, U10, U11; docs/uk_results.md). Steps with fewer than 20 lines
+# there get 0: not enough evidence to draw them.
+UNIT_STEP_CONFIDENCE = {(2, 1): 0.833,       # level 2 -> the top (20 of 24 right)
+                        (3, 2): 0.630,       # Director -> Director General (51 of 81)
+                        (4, 3): 0.835}       # Deputy Director -> Director (101 of 121)
+
+
+def from_unit(department):
+    """True where the function came from the organisation's own unit (see parse_title)."""
+    dept = department.astype(object)
+    return dept.map(lambda d: isinstance(d, str) and bool(d.strip())
+                    and d not in DEPT_TO_FUNCTION).astype(bool)
+
 
 def add_span_feature(pred):
     """How many people we gave each manager, compared with similar managers in the
@@ -347,6 +385,10 @@ def predict(df, use_model=True):
     else:
         pred["confidence"] = pred.rule_confidence
         threshold, source = RULE_THRESHOLD, "hand-set rules"
+    unit = has_edge & from_unit(pred.department)           # UK-style lines: measured instead
+    if unit.any():
+        steps = zip(pred.loc[unit, "f_level"].astype(int), pred.loc[unit, "f_manager_level"].astype(int))
+        pred.loc[unit, "confidence"] = [UNIT_STEP_CONFIDENCE.get(s, 0.0) for s in steps]
 
     # Abstain below the threshold: a wrong edge is worse than no edge
     low = pred.confidence < threshold

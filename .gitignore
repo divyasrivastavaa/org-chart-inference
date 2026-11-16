@@ -1,10 +1,18 @@
-data/
+# Built data is not committed (everything is reproducible) ...
+data/*
+# ... except the raw UK organogram files, so data/uk can be rebuilt offline
+!data/raw/
+data/raw/*
+!data/raw/uk/
 __pycache__/
 .venv/
 
 # Firmable's task brief: keep a local copy only, don't publish it
 Data - Take Home Task_ Org Chart Inference _ Notion.html
 Data - Take Home Task_ Org Chart Inference _ Notion_files/
+
+# API keys (Gemini): local only. When deployed, use Streamlit Cloud's Secrets settings.
+.streamlit/secrets.toml
 
 # Personal Claude Code settings (the shared ones in .claude/settings.json are committed)
 .claude/settings.local.json

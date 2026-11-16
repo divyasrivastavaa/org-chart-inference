@@ -27,7 +27,7 @@ import infer
 
 TRAIN_DIR = Path("data/train_seed1")
 MODEL_DIR = Path("models")
-COST_OF_WRONG_EDGE = 4          # "a wrong edge is worse than no edge": 4x worse
+COST_OF_WRONG_EDGE = 7 / 3      # "a wrong edge is worse than no edge": ~2.3x worse -> 0.7
 MAX_DEPTH = 4                   # small enough to read; see the depth table printed below
 MIN_LEAF = 200                  # every leaf's probability rests on >= 200 real edges
 
@@ -91,10 +91,10 @@ def main():
     tree = DecisionTreeClassifier(max_depth=MAX_DEPTH, min_samples_leaf=MIN_LEAF,
                                   random_state=0).fit(Xtr, ytr)
     p = tree.predict_proba(Xva)[:, 1]
-    threshold = COST_OF_WRONG_EDGE / (COST_OF_WRONG_EDGE + 1)
+    threshold = round(COST_OF_WRONG_EDGE / (COST_OF_WRONG_EDGE + 1), 4)   # 0.7, not 0.69999
     keep = p >= threshold
     print(f"\nChosen depth {MAX_DEPTH}, threshold {threshold} "
-          f"(a wrong edge costs {COST_OF_WRONG_EDGE}x a missing one)")
+          f"(a wrong edge costs {COST_OF_WRONG_EDGE:.1f}x a missing one)")
     print(f"Validation: precision {yva[keep].mean():.1%} on {keep.sum()} of {len(p)} edges "
           f"kept; rules at 0.75 keep {(e.rule_confidence[is_val] >= 0.75).sum()} "
           f"at {yva[(e.rule_confidence[is_val] >= 0.75).values].mean():.1%}")
@@ -111,7 +111,7 @@ def main():
     prob = (values[:, list(tree.classes_).index(1)] / values.sum(axis=1)).round(4)
     MODEL_DIR.mkdir(exist_ok=True)
     model = dict(features=infer.FEATURES, decision_threshold=threshold,
-                 cost_of_wrong_edge=COST_OF_WRONG_EDGE, max_depth=MAX_DEPTH,
+                 cost_of_wrong_edge=round(COST_OF_WRONG_EDGE, 4), max_depth=MAX_DEPTH,
                  trained_on="v2 seed 1, 400 companies (by company split)",
                  children_left=t.children_left.tolist(),
                  children_right=t.children_right.tolist(),

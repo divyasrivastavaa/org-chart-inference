@@ -101,3 +101,45 @@ What the tree learned (worth discussing):
 Still weak: shared-manager teams (63% precision, coverage cut to 16%) and manager-missing
 cases (every edge drawn there is wrong by definition: 13% coverage). The features can't
 fully tell these apart from normal teams.
+
+## E5. Default threshold 0.7 instead of 0.8 (16 Nov 2026)
+Same tree, only the cut-off moved: a wrong line now costs about 2.3 times a missing one,
+so draw when P(correct) >= 2.3 / 3.3 = **0.7**. Two leaves change from "abstain" to "draw":
+P = 0.795 (767 training edges, a skipped empty layer in a big function) and P = 0.789
+(3,440 edges, 2+ teamless managers in a big company: the shared-manager-team signal).
+
+| Dataset | Threshold | Precision | Coverage | Wrong edges | Brier |
+|---|---|---|---|---|---|
+| v2 seed 42 (app) | 0.8 | 96.3% | 58.7% | 3,465 / 92,408 | 0.0433 |
+| v2 seed 42 (app) | **0.7** | **95.2%** | **62.7%** | 4,727 / 98,684 | 0.0433 |
+| v2 seed 7 (held out) | 0.8 | 96.3% | 60.6% | 3,399 / 91,050 | 0.0420 |
+| v2 seed 7 (held out) | **0.7** | **95.4%** | **63.7%** | 4,411 / 95,794 | 0.0420 |
+| real (43 confirmed lines) | 0.8 | 100% (36/36) | 84% | 0 | – |
+| real (43 confirmed lines) | **0.7** | **100% (36/36)** | **84%** | 0 | – |
+
+- Seed 42: +6,276 lines, of which 79.9% right. That matches the leaves' 0.79-0.80, so the
+  confidence stays honest. Brier doesn't change (the confidences themselves are the same).
+- Shared-manager teams: precision 63% -> 59%, because the 0.789 leaf is mostly these.
+- Real data: unchanged. No confirmed line had a confidence between 0.7 and 0.8.
+
+## E6. UK government organograms: third dataset, civil-service titles (16 Nov 2026)
+Real answer key ("Reports to Senior Post") for 12 organisations, 2,281 senior posts. Split by
+organisation into a tune half and a test half before looking at errors. Full write-up:
+`docs/uk_results.md`.
+
+| UK, threshold 0.7 | Precision | Coverage | Lines (wrong) |
+|---|---|---|---|
+| Before, tune half | 33.3% | 1.0% | 12 (8) |
+| Before, test half | – | 0.0% | 0 |
+| After, tune half (fixes designed here) | 83.6% | 12.6% | 146 (24) |
+| **After, test half** | **85.0%** | **25.3%** | 280 (42) |
+
+Fixes in `infer.py`:
+- **Civil-service ladder:** Permanent Secretary and Chief Executive = top; Director General = 2;
+  plain Director = 3 where Deputy Directors exist; Deputy Director = 4.
+- **Units as functions:** non-standard unit names are used as the function.
+- **Measured confidence:** for unit-based lines, the precision measured per step on the tune
+  half (the tree gave 0.95+ but only 69% were right).
+
+Regression check: Benchmark seed 42 (95.2% / 62.7%, 4,727 wrong, Brier 0.0433), seed 7
+(95.4% / 63.7%, 4,411 wrong, Brier 0.0420) and ASX/NZX (36 of 36, 84%) are **unchanged**.

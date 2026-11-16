@@ -1,277 +1,200 @@
 # Org Chart Inference
 
+Turns a flat list of people and job titles into an org chart, with a confidence on every
+reporting line, and leaves the manager blank (with a reason) when it isn't sure.
+
 **Live app:** https://divya-org-chart.streamlit.app
 *(Free hosting sleeps when idle. If you see "Yes, get this app back up!", click it and allow
-2-3 minutes while the dataset is rebuilt.)*
+2–3 minutes while the data is rebuilt.)*
 
-Turns a flat list of employees (name + job title + messy extras) into an org chart, with a
-confidence on every reporting line. When the evidence isn't strong enough, the manager is
-left blank with a reason, because a wrong edge is worse than no edge.
+![Front page: overall numbers and the table of all 532 companies](docs/images/front_page.png)
+
+## What it does
+
+- **Infers who reports to whom** for every organisation, from names, job titles and (if
+  given) a department or unit. It never sees the real reporting lines.
+- **Gives every line a confidence** and draws it only at 0.7 or above, because a wrong line
+  is worse than no line. Everyone without a line is listed with the reason.
+- **Measures itself** against an answer key on three datasets: 500 generated companies, 20
+  real ASX/NZX leadership teams and 12 real UK government organisations.
+- **Lets you try changes** in the app: add people, remove people, and see how the chart
+  reacts. An optional Gemini judge can place people instead of the rules.
+
+## How it works
+
+![How it works: data, inference, decide and score](docs/flow.svg)
+
+1. **Title parsing.** Each title is cleaned ("Sr. Mgr" → "senior manager") and read into a
+   **level** (1 = CEO … 8 = intern), a **function** (Engineering, Sales …) and a **team**.
+   UK civil-service titles have their own ladder: Permanent Secretary > Director General >
+   Director > Deputy Director.
+2. **Company context.** The rest of the company fixes single titles:
+   - finds the CEO;
+   - a team or unit name fills in a missing function;
+   - 3+ "managers" in one team are really individual contributors;
+   - a divisional CEO sits below the group CEO.
+3. **Manager search.** Look one level up in the same function (and team), then climb. If
+   nobody fits, or several people do, **abstain** and save the reason.
+4. **Confidence tree + threshold 0.7.** A small decision tree (9 readable leaves, trained on a
+   separate dataset) scores each proposed line from the evidence behind it. A line is drawn
+   only at **confidence ≥ 0.7**: a wrong line costs about **2.3×** a missing one, so a line
+   is worth drawing when it is right at least 70% of the time (2.3 / 3.3 ≈ 0.7).
+
+## Datasets
+
+| Dataset | What it is | Size | Answer key |
+|---|---|---|---|
+| **Benchmark** | Companies made by `generate_data.py`, with realistic messy titles (abbreviations, missing teams, two-manager teams, missing managers …) | 500 companies, ~158k people | The generator knows every true manager |
+| **ASX/NZX leadership** | Real leadership teams copied from each company's own website | 20 companies, 218 leaders | Small: 43 lines that the company confirmed in writing (press releases, annual reports) |
+| **UK government organograms** | The senior-staff organograms UK government bodies publish on data.gov.uk | 12 organisations, 2,281 posts | The published "Reports to Senior Post" column (never shown to the model, nor grade or salary) |
+
+- Every source, with its link and date, is listed in [Sources](#sources) and in
+  `data/real/sources.csv`. The app shows each company's sources under its chart.
+- **UK data:** Contains public sector information licensed under the
+  [Open Government Licence v3.0](https://www.nationalarchives.gov.uk/doc/open-government-licence/version/3/).
 
 ## Results
 
-Measured against a hidden answer key, on 500 companies (~158k people) of realistic,
-messy data:
+Threshold 0.7. **Precision** = of the lines drawn, the share that are right.
+**Coverage** = the share of people (with a known manager) who got a line.
 
-| Dataset | Precision | Coverage | Wrong lines |
-|---|---|---|---|
-| App data (seed 42) | **96.3%** | 58.7% | 3,465 of 92,408 |
-| Held-out data (seed 7, never looked at while building) | **96.3%** | 60.6% | 3,399 of 91,050 |
+| Dataset | Precision | Coverage |
+|---|---|---|
+| Benchmark, seed 42 (used while building) | 95.2% | 62.7% |
+| Benchmark, seed 7 (**held out**, never looked at) | 95.4% | 63.7% |
+| ASX/NZX (43 confirmed lines) | 100% (36 of 36) | 84% |
+| UK, tune half (UK fixes designed here) | 83.6% | 12.6% |
+| UK, **test half** (never looked at) | 85.0% | 25.3% |
 
-- **Precision**: of the reporting lines drawn, the share that are correct.
-- **Coverage**: the share of people (excluding CEOs) who got a manager.
-- Confidence is **calibrated**: lines scored ~0.8 are right ~80% of the time, ~0.98 about 97%.
-- Full history of every change and its numbers: [docs/experiments.md](docs/experiments.md).
+- **Before the UK fixes,** our rules managed only 33% precision and 0.5% coverage on the UK
+  data. The fixes (civil-service ladder, unit as function, a confidence measured on the
+  tune half) didn't change the Benchmark or ASX/NZX numbers. Details:
+  [docs/uk_results.md](docs/uk_results.md).
+- **The confidence is honest:** lines scored ~0.8 are right ~80% of the time.
+- **Every change and its numbers:** [docs/experiments.md](docs/experiments.md).
 
-## Real data
+## Rules vs Gemini judge
 
-To check the rules outside my own generator, I also tested them on real companies:
+As an option, Gemini can place a person instead. It gets the person's name, title and unit,
+plus a short list of candidate managers built from our rules (at most 8). Never the whole
+company, never the answer key. Comparison from
+[docs/judge_comparison.md](docs/judge_comparison.md) (`gemini-3.5-flash-lite`, free tier,
+threshold 0.7):
 
-- **20 ASX/NZX-listed companies** from 6 industries (banks, telecom, retail, mining, healthcare,
-  tech), with **218 leaders** copied from each company's own leadership page.
-  LinkedIn wasn't used.
-- **43 confirmed reporting lines.** These are the only people whose manager the company states
-  in writing:
-  - **12 explicit**: a press release about that person, e.g. "…reporting to CEO Anthony Miller".
-  - **31 team statements**: an annual report or governance statement that says a named team
-    reports to the CEO.
+| Dataset | Judge | People | Lines drawn | Right | Precision | Coverage |
+|---|---|---|---|---|---|---|
+| Benchmark seed 7 (held out) | Rules | 50 | 34 | 34 | 100.0% | 68.0% |
+| Benchmark seed 7 (held out) | Gemini | 50 | 33 | 32 | 97.0% | 66.0% |
+| UK test half | Rules | 50 | 21 | 16 | 76.2% | 42.0% |
+| UK test half | Gemini | 50 | 27 | 19 | 70.4% | 54.0% |
+| ASX/NZX (all with an answer) | Rules | 43 | 36 | 36 | 100.0% | 83.7% |
+| ASX/NZX (all with an answer) | Gemini | 43 | 43 | 42 | 97.7% | 100.0% |
 
-  Everyone else is left unscored rather than guessed.
+- **The ceiling:** Gemini can only pick the true manager if that person is on its short
+  list, which happens for 72% of the Benchmark sample and 56% of the UK sample. Better
+  candidate lists would matter more than a smarter model.
+- **Why rules stay the default:**
+  - Gemini had lower precision on every dataset (it draws more lines, and some are wrong).
+  - The rules are free, instant, give the same answer every time, and each line comes with
+    a reason.
+  - Gemini needs a key and has tight free-tier limits.
+  - ASX/NZX is an easy case for Gemini: the right answer is always the CEO, who is always on
+    its list.
+- **Using your own key:**
+  - **Locally:** put `GEMINI_API_KEY = "your key"` in `.streamlit/secrets.toml`.
+  - **When deployed:** add the same line in Streamlit Cloud under Settings → Secrets.
+  - **Never commit the key.** `secrets.toml` is in `.gitignore`.
+  - Without a key, the app falls back to the rules and says so.
 
-| Real data (43 confirmed lines) | Lines drawn | Correct | Coverage |
-|---|---|---|---|
-| Before the title fixes | 0 | – | 0% |
-| After the title fixes | **36** | **36 of 36** | **84%** |
+## What-if
 
-- **Why it started at zero:** real executive titles look different from the synthetic ones.
-  "Managing Director and Chief Executive Officer" was read as a Director, and "Group
-  Executive, Retail Banking" couldn't be read at all, so no CEO was found.
-- **Five small title fixes** solved most of it: CEO titles, a leading "Group ", "Chief …
-  Officer", "Group Executive / General Counsel / Company Secretary", and divisional CEOs such
-  as "Chief Executive Officer, Westpac New Zealand".
-- **The synthetic results above are unchanged** (seed 42 and seed 7: same precision,
-  coverage, wrong lines and Brier score).
-- **Limits:**
-  - The sample is small: one wrong line would cost about 3 points of precision.
-  - Public sources only cover the **top layer** (the CEO and their direct reports), so this
-    doesn't test the deeper levels.
-  - 7 titles are still misread.
+On any company page:
 
-Full tables and the list of misread titles: [docs/real_data_results.md](docs/real_data_results.md).
+- **+ Add people:** type them **one by one** (Name optional, Designation) or **paste a list**
+  (`Name | Designation` per line). You can also create a new organisation. They're placed by
+  the rules (or Gemini), marked "manually added", and never counted in precision.
+- **− Remove people:** pick who is leaving and, optionally, where they are **moving to**
+  ("Google"). Their card stays, faded, saying "Left → Google", and their team is placed
+  again. If nobody more senior is left in that function, the team **moves to the CEO as
+  interim** (confidence 0.75, never scored).
+- **Undo last change**, **Reset to original** and **Download CSV** (the chart as shown).
+- **Only for you:** everything runs **in memory, per visitor**. Nothing is saved, and other
+  visitors and the results above don't change.
 
-## The app
+| Add people | After removing the CTO ("Moving to: Google") |
+|---|---|
+| ![Add people popup](docs/images/add_people.png) | ![Company after the CTO left: faded card, team interim under the CEO](docs/images/remove_cto.png) |
 
-- **Front page:** overall precision and coverage, plus a table of all 500 companies (name,
-  industry, employees, coverage, precision). You can search it, sort it by any column, and
-  click a row to open that company. The sidebar dropdown stays in sync.
-- **Shareable links:** each company has its own address, e.g.
-  [?company=C490](https://divya-org-chart.streamlit.app/?company=C490).
-- **Expandable org chart:** starts with the CEO. Each card shows name, title and the
-  confidence of the line to their manager, plus a count of everyone under that person.
-  Click the count to open their direct reports, and "Collapse" to close them.
-- **"Not placed" section:** people the model didn't give a manager are listed with the
-  reason, so nobody is lost. Teams under them can still be expanded.
-- **Accuracy view:** with "Show accuracy" ticked, cards are green (matches the answer key)
-  or red (wrong). The confidence slider shows what changes at other thresholds.
-- **Tooltips:** the "?" next to Employees, Coverage, Precision and the threshold explain
-  each number.
-- Also: a "Who does this person report to?" chain and a function filter.
+| A company page (Benchmark) | A UK organisation (DWP) | The Docs popup |
+|---|---|---|
+| ![Company page with the expandable org chart](docs/images/company_page.png) | ![Department for Work and Pensions: Permanent Secretary and Directors General](docs/images/uk_organisation.png) | ![Docs popup with the flow diagram](docs/images/docs_popup.png) |
 
-Screenshots, in case the app is asleep:
+The DWP screenshot shows the Permanent Secretary and Directors General placed correctly. Its
+coverage (4%) is far below the UK average: DWP has only 10 units for 337 posts. So each
+Deputy Director has several possible Directors in their unit, and the rules abstain (244 of
+248 Deputy Directors get no line).
 
-**Front page:** overall results and the searchable, sortable company table
-![Front page with the company table](docs/images/front_page.png)
+## Limits
 
-**Expanded org chart** (Atlasatlas Pty Ltd, C490): CEO, their direct reports, and one team opened
-![Expanded org chart](docs/images/org_chart_expanded.png)
+- **Small answer keys for real data:** ASX/NZX has only 43 confirmed lines, all from the top
+  layer. One wrong line would cost about 3 points of precision.
+- **UK files stop at Deputy Director level,** so only the top 4–5 levels are tested, in 12
+  organisations.
+- **The Benchmark is generated by my own code.** The held-out seed shares its recipe, which is
+  why the real datasets matter.
+- **The Gemini comparison is small** (143 people), so differences of a few points are noise.
+- **Gemini's free tier is tight:** 20 requests a day for `gemini-3.6-flash`, and the newest
+  Flash model was overloaded when tested.
+- **Still hard:** teams with two managers, managers missing from the data, and dotted lines
+  (detected, but never drawn).
 
-**Not placed:** people without a confident manager, each with the reason
-![Not placed section](docs/images/not_placed.png)
+## Run it locally
 
-## What if
-
-**Dataset switch:** the sidebar has a **Dataset** choice:
-- **"Synthetic (500 companies)"**, the generated data with the full answer key.
-- **"Real companies (20)"**, the public leadership teams. Here, accuracy is only checked for
-  the 43 people with a confirmed manager. Other drawn lines stay uncoloured, because there's
-  nothing to check them against.
-
-Links remember the choice, e.g. `?data=real&company=R01` opens Commonwealth Bank.
-
-**Dataset switch:** the real companies, with coverage and precision on the confirmed lines
-("None" = no confirmed lines at that company)
-![Dataset switch set to the real companies](docs/images/dataset_switch_real.png)
-
-**"What if…" section:** each company page has this section above the chart. It lets you change
-the company and see how the model reacts:
-
-- **Someone leaves:** pick a person, and optionally the company they join. Click **Simulate
-  leaving**.
-  - Their role stays on the chart as a grey, dashed **vacant card**, e.g. "Chief Security
-    Officer (vacant since Nov 2026)", so the gap is visible instead of hidden.
-  - The people who reported to them now report to the vacant card and are labelled
-    **manager left**.
-  - If they join a company in the data, they appear there too.
-- **Add people:** enter a name, title and (optionally) a department, then click **Add**. The page
-  shows where the new person lands, with the line's confidence, or the reason no manager was
-  drawn.
-- **Reset** clears all changes.
-
-The model is re-run in memory for the affected companies only. Changes are **per visitor**
-(your browser session) and **never saved**, so they don't change the results above or anyone
-else's view.
-
-**"What if" example:** the CEO leaves Commonwealth Bank. *This is a simulation in the app, not
-real news.* The CEO role becomes a vacant card at the top, and the executives under it are
-marked "manager left".
-![What if: the CEO leaves Commonwealth Bank (simulation)](docs/images/whatif_ceo_leaves.png)
-
-## How I know it works
-
-Designing the data so it could be scored was the first decision:
-
-1. **Truth first.** `generate_data.py` builds each company top-down (CEO -> C-level -> VP ->
-   Director -> Manager -> ICs), so every person's real manager is known. It then writes a
-   messy copy without the manager column. Inference only sees the messy copy.
-2. **Hard cases are labelled.** Every person carries a scenario tag (normal, unusual title,
-   two managers in one team, manager missing from the data, contractor, dotted line), so
-   results can be split by what makes them hard instead of hiding behind one average.
-3. **Three datasets, three jobs.** Seed 1 trains the confidence model, seed 42 is for
-   development and the app, and seed 7 is held out. Training is split **by company**, never
-   by row, to avoid leakage.
-4. **I tested my own circularity.** I wrote the first rules on simpler data (99.1% precision),
-   then built harder, realistic data. The same rules dropped to **84.0%**. That gap is the
-   honest measure of "rules tuned to their own generator", and it drove the next round of work.
-5. **Wrong lines are not all equal.** `evaluate.py` separates skip-level errors (the boss's
-   boss: right chain, too high) from dotted-line and other errors, and reports calibration,
-   Brier score, and precision/coverage by level and by scenario.
-
-## The data
-
-`python generate_data.py`: 500 companies, 100-1,200 employees each (55% small, 30% mid,
-15% large), 8 industries, 6 locations, 10 functions with teams, 8 seniority levels.
-
-Realism (hard cases, each tagged in the answer key):
-- Real-world titles: "Founder & CEO", "Managing Director", "CHRO", "SVP", "Head of
-  Engineering" (a VP), "Team Lead", "Staff/Principal", "Graduate", "Intern".
-- IC titles containing "manager": "Customer Success Manager", "Account Manager".
-- Teams with two managers, 6% of middle managers missing from the data, 5% contractors,
-  and data analysts embedded in business teams (solid line to Data, dotted line to the business).
-
-Mess: synonyms, abbreviations (Sr., Mgr, Dir., SWE, CTO), random casing, dropped team names,
-inconsistent separators, extra spaces, 25% blank departments, 2% blank titles, 5% blank
-locations, 1% duplicate rows. `--v1` rebuilds the original simpler dataset; `--seed N` builds
-a new held-out set.
-
-## Approach
-
-1. **Read each title** (`infer.py`): clean and expand abbreviations, strip founder and
-   contractor wording, then read level by keyword priority (VP > Director > Junior > Manager >
-   Senior; "Lead" depends on position), function from keywords or department, and team from
-   the text after the comma.
-2. **Use the rest of the company.** A team name tells you the function, which fills blank
-   departments. 3+ "managers" in one team means it's really an IC title there.
-3. **Find the manager** by walking up the layers in the same function (Manager -> Director ->
-   VP -> C-level), matching team at team levels.
-4. **Abstain with a reason** when it's ambiguous: several candidates, candidates without a
-   team, an IC whose team manager is missing, a team that belongs to another function
-   (dotted line?), a teamless "Head of" that might be the VP, or an unreadable title.
-5. **Score confidence with a decision tree** (`train_confidence.py`). It's trained on a separate
-   dataset, using 13 pieces of evidence behind each line (layers skipped, team present,
-   candidate pool, teamless managers nearby ...). It has 9 leaves, and you can read them in
-   [models/confidence_tree.txt](models/confidence_tree.txt). It's saved as JSON, so the app
-   doesn't need scikit-learn.
-6. **Draw only above 0.8.**
-
-## Key decisions
-
-- **Precision over coverage.** A sales rep emailing the wrong "boss" is worse than seeing
-  "unknown".
-- **The threshold is derived, not tuned.** If a wrong line costs 4x a missing one, a line is
-  worth drawing when P(correct) > 4/5 = 0.8. A different business cost changes one number.
-- **A small readable tree over a black box.** A depth-8 tree scored slightly better (Brier
-  0.0440 vs 0.0465) but has 57 leaves. Nine leaves can be checked by a person. One of them
-  shows that a line skipping a layer other teams have is 0% correct (965 edges), which the
-  hand-set penalties had scored 0.70.
-- **Every change is checked on all datasets.** E.g. stripping "Group " for "Group CEO"
-  silently turned "Group Product Manager" into an IC. The regression check on the original
-  data caught it.
-
-## Limitations
-
-- **Two-manager teams** (63% precision on the lines still drawn) and **missing managers**
-  remain hard. Usually one manager's title lost its team name, so only one candidate is visible.
-- **Synthetic data.** Held-out seeds share the generator's recipe. On real data I'd
-  hand-label a stratified sample of companies as the test set and add a "this is wrong"
-  feedback loop that feeds the tree.
-- **Dotted lines** are detected (and abstained on), not drawn. A real product should store
-  solid and dotted edges as two types.
-- **Next experiment:** GLiNER / GLiNER2 (small zero-shot extraction models) run offline on
-  the ~5,400 unique titles, to read title formats the rules were never written for. See
-  [docs/research_models.md](docs/research_models.md).
-
-## How to run
-
-Windows, Python 3.13. Library versions are pinned in `requirements.txt` (the exact versions
-the app was tested with), so the hosted app doesn't change when new releases come out.
+Windows, Python 3.13. Versions are pinned in `requirements.txt`.
 
 ```
 python -m venv .venv
 .venv\Scripts\activate
 pip install -r requirements.txt
 
-python generate_data.py        # data/truth.csv (answer key) + data/employees.csv (messy)
-python infer.py                # data/predictions.csv
-python evaluate.py             # precision, coverage, calibration, by level / scenario
-streamlit run app.py           # the app (builds the data itself if missing)
+streamlit run app.py             # the app; builds any missing data itself
 
-python train_confidence.py     # retrain the confidence tree (seed 1)
-python generate_data.py --seed 7 --out data/holdout_seed7    # held-out check
+python generate_data.py          # Benchmark: data/employees.csv + data/truth.csv
+python infer.py                  # -> data/predictions.csv
+python evaluate.py               # precision, coverage, calibration ...
+
+python generate_data.py --seed 7 --out data/holdout_seed7   # held-out Benchmark
 python infer.py data/holdout_seed7
 python evaluate.py data/holdout_seed7
 
-python scripts/build_real.py         # data/real/employees.csv (218 public leaders) + sources.csv
-python scripts/build_real_truth.py   # data/real/truth.csv (the 43 confirmed lines + quotes)
+python scripts/build_real.py     # ASX/NZX leaders + sources.csv
+python scripts/build_real_truth.py
 python infer.py data/real
-python evaluate.py data/real         # scores only the confirmed lines, by evidence type
+python evaluate.py data/real
 
-python scripts/add_people.py R10 scripts/new_people_example.csv          # try: temporary copy
-python scripts/add_people.py R10 scripts/new_people_example.csv --save   # keep for good
+python scripts/build_uk.py       # UK, offline from data/raw/uk/ (download_uk.py re-downloads)
+python infer.py data/uk
+python evaluate.py data/uk
+
+python scripts/compare_judges.py # rules vs Gemini (needs your key)
 ```
 
-Changes that go into the data files (the app's "What if" section never writes files):
-
-- **`scripts/add_people.py`** adds people from a small CSV (`full_name, title, department`) to
-  one company and prints who the model says they report to.
-  - Without `--save`, it works on a copy in `data/real_added/`.
-  - With `--save`, it adds them to `scripts/added_people.csv` and rebuilds the real data.
-- **`scripts/added_people.csv`** lists people added by hand. They're added to the real data
-  as `source = "manually added"` and are **never scored**.
-- **`scripts/leavers.csv`** (`company_id, full_name, left_date, new_company`, optional `note`)
-  lists people who left. When the data is built, each leaver's role becomes a vacant card.
-  Their reports are marked "manager left", and the person is added to their new company if
-  it's in the data.
-
-Both CSV files are kept **empty** in this repo, so the results above stay exactly as reported.
+**Project structure (main files):**
 
 | File | What it does |
 |---|---|
-| `generate_data.py` | true org chart + messy copy |
-| `infer.py` | title parsing, manager search, abstentions, tree confidence |
-| `train_confidence.py` | trains the confidence tree on a separate dataset |
-| `evaluate.py` | scores predictions against the answer key |
-| `app.py` | Streamlit app: dataset switch, company table, company page, "What if" |
-| `org_chart.py` | the expandable org chart (plain HTML/CSS/JavaScript) |
-| `whatif.py` | the app's "What if" changes, re-run in memory |
-| `leavers.py` | turns leavers into vacant cards (used by both data builders and "What if") |
-| `scripts/build_real.py`, `scripts/build_real_truth.py` | real leadership data and its confirmed lines |
-| `scripts/add_people.py` | add people to a real company (temporary, or `--save`) |
-| `scripts/added_people.csv`, `scripts/leavers.csv` | hand-added people and leavers (empty) |
-| `docs/real_data_results.md` | real-data results, before/after the title fixes |
-| `models/` | the trained tree (JSON + readable rules) |
-| `docs/experiments.md` | every experiment and its numbers |
-| `docs/research_models.md` | notes on decision models and GLiNER |
-| `CLAUDE.md`, `.claude/` | project context and an `/eval` command for Claude Code |
+| `generate_data.py` | Benchmark companies + answer key |
+| `infer.py` | title parsing, company context, manager search, confidence |
+| `train_confidence.py` | trains the confidence tree (`models/`) on a separate dataset |
+| `evaluate.py` | scores predictions against an answer key |
+| `app.py` | the Streamlit app |
+| `org_chart.py` | the expandable org chart (HTML/CSS/JavaScript) |
+| `whatif.py` | add / remove people, re-run in memory |
+| `judge_gemini.py` | the optional Gemini judge |
+| `scripts/build_real.py`, `scripts/build_real_truth.py` | ASX/NZX data, answer key and sources |
+| `scripts/download_uk.py`, `scripts/build_uk.py`, `data/raw/uk/` | UK organograms |
+| `scripts/compare_judges.py` | rules vs Gemini comparison |
+| `docs/` | results, experiments, flow diagram, screenshots |
 
 ## How I used AI
 - I used Claude Code, an AI coding assistant, inside VS Code for this project.
@@ -281,3 +204,61 @@ Both CSV files are kept **empty** in this repo, so the results above stay exactl
 - I made the key choices, like preferring precision over coverage, testing on a separate held-out dataset, and adding the decision tree for confidence.
 - Before each upload, I checked git status so that private files, like the task brief, were never made public.
 - I can explain every file, and I have kept the AI’s notes in docs/experiments.md so reviewers can see what was tried.
+
+## Sources
+
+- **Benchmark:** generated by `generate_data.py`. No outside source.
+- **UK government organograms:** the newest senior-staff organogram CSV of 12 organisations
+  from [data.gov.uk](https://www.data.gov.uk/), downloaded 16 Nov 2026 (pinned URLs in
+  `scripts/download_uk.py`; raw files committed in `data/raw/uk/`). Contains public sector
+  information licensed under the
+  [Open Government Licence v3.0](https://www.nationalarchives.gov.uk/doc/open-government-licence/version/3/).
+- **ASX/NZX leadership:** each company's own leadership page, checked 14 Nov 2026. The answer
+  key comes from 15 written company sources, each quoted with its link in
+  `scripts/build_real_truth.py`.
+- **Full list:** all 47 sources (35 ASX/NZX + 12 UK) are in `data/real/sources.csv`.
+
+**ASX/NZX leadership pages:**
+
+| ID | Company (leadership page) | What it shows |
+|---|---|---|
+| R01 | [Commonwealth Bank of Australia](https://www.commbank.com.au/about-us/our-company/management.html) | names and job titles of 14 leaders |
+| R02 | [Westpac Banking Corporation](https://www.westpac.com.au/about-westpac/westpac-group/executive-team/) | names and job titles of 13 leaders |
+| R03 | [National Australia Bank](https://www.nab.com.au/news/media-hub/media-assets) | names and job titles of 10 leaders |
+| R04 | [ANZ Group Holdings](https://www.anz.com/shareholder/centre/about/executive-committee/) | names and job titles of 10 leaders |
+| R05 | [Macquarie Group](https://www.macquarie.com/au/en/about/company/executive-committee.html) | names and job titles of 10 leaders |
+| R06 | [Telstra Group](https://www.telstra.com.au/aboutus/our-company/leadership-team) | names and job titles of 9 leaders |
+| R07 | [TPG Telecom](https://www.tpgtelecom.com.au/about-us/our-executive-team) | names and job titles of 7 leaders |
+| R08 | [Wesfarmers](https://www.wesfarmers.com.au/who-we-are/leadership-team) | names and job titles of 13 leaders |
+| R09 | [Woolworths Group](https://www.woolworthsgroup.com.au/au/en/who-we-are/our-leadership-team/management-board.html) | names and job titles of 14 leaders |
+| R10 | [Coles Group](https://www.colesgroup.com.au/about-us/?page=executive-leadership-team) | names and job titles of 10 leaders |
+| R11 | [Rio Tinto](https://www.riotinto.com/en/about/executive-committee) | names and job titles of 9 leaders |
+| R12 | [Lynas Rare Earths](https://lynasrareearths.com/about-us/our-leadership-team/) | names and job titles of 8 leaders |
+| R13 | [IGO Limited](https://www.igo.com.au/site/our-business/leadership) | names and job titles of 5 leaders |
+| R14 | [Fortescue](https://www.fortescue.com/en/about-fortescue/board-and-leadership-team) | names and job titles of 4 leaders |
+| R15 | [Cochlear](https://www.cochlear.com/us/en/corporate/investors/corporate-information/executive-team) | names and job titles of 12 leaders |
+| R16 | [Fisher & Paykel Healthcare](https://www.fphcare.com/us/corporate/about-us/executive-management/) | names and job titles of 13 leaders |
+| R17 | [Ramsay Health Care](https://www.ramsayhealth.com/en/about/board-and-management/) | names and job titles of 11 leaders |
+| R18 | [Xero](https://www.xero.com/us/about/team/) | names and job titles of 14 leaders |
+| R19 | [WiseTech Global](https://www.wisetechglobal.com/investors/our-leadership-team/) | names and job titles of 17 leaders |
+| R20 | [Computershare](https://www.computershare.com/corporate/about-us/global-management-team) | names and job titles of 15 leaders |
+
+**ASX/NZX answer-key sources:**
+
+| ID | Company (source) | What it shows |
+|---|---|---|
+| R01 | [Commonwealth Bank of Australia](https://www.commbank.com.au/articles/newsroom/2026/06/elt-update.html) | Confirms Rodrigo Castillo and Victoria Ledda report to Matt Comyn (published 2026-06-19) |
+| R01 | [Commonwealth Bank of Australia](https://www.commbank.com.au/content/dam/commbank-assets/investors/docs/results/fy25/corporate-governance-statement-fy25.pdf) | Confirms Monique Macleod, Stuart Munro, Karen O'Flynn, Angus Sullivan, Sinead Taylor and Michael Vacy-Lyle report to Matt Comyn (published 2025) |
+| R02 | [Westpac Banking Corporation](https://www.westpac.com.au/about-westpac/media/media-releases/2025/2-april/) | Confirms Kate Dee reports to Anthony Miller (published 2025-04-02) |
+| R02 | [Westpac Banking Corporation](https://www.westpac.com.au/about-westpac/media/media-releases/2025/26-may/) | Confirms Dr Andrew McMullan reports to Anthony Miller (published 2025-05-26) |
+| R02 | [Westpac Banking Corporation](https://www.westpac.com.au/content/dam/public/wbc/documents/pdf/aw/ic/wbc-corporate-governance-statement.pdf) | Confirms Kate Dee, Shannon Finch, Paul Fowler, Nathan Goonan, Richard Heeley, Peter Herbert, Nell Hutton, Carolyn McCann, Catherine McGrath, Dr Andrew McMullan, Fiona Wild and Ryan Zanin report to Anthony Miller (published 2026) |
+| R03 | [National Australia Bank](https://www.nab.com.au/news/nab-updates/nab-appoints-group-executive) | Confirms Pete Steel reports to Andrew Irvine (published 2025-06-24) |
+| R03 | [National Australia Bank](https://www.nab.com.au/news/nab-updates/nab-announces-executive-changes) | Confirms Shane Conway reports to Andrew Irvine (published 2025-10-21) |
+| R03 | [National Australia Bank](https://www.nab.com.au/content/dam/nab/documents/reports/corporate/2021-corporate-governance-statement.pdf) | Confirms Andrew Auerbach, Jon Benson, Cathryn Carver, Ana Marinkovic, Inder Singh, Sarah White, Pete Steel and Shane Conway report to Andrew Irvine (published 2021) |
+| R04 | [ANZ Group Holdings](https://www.anz.com.au/newsroom/media/2025/october/appointments-to-anz-group-executive-committee/) | Confirms Pedro Rodeia, Christine Palmer and Donald Patra report to Nuno Matos (published 2025-10-09) |
+| R05 | [Macquarie Group](https://www.macquarie.com/assets/macq/about/company/corporate-governance-documents/macquarie-group-fy26-corporate-governance-summary.pdf) | Confirms Andrew Cassidy reports to Greg Ward (published 2026) |
+| R07 | [TPG Telecom](https://www.tpgtelecom.com.au/sites/default/files/2025-03/TPG-Telecom-2024-AnnualReport-FINAL.pdf) | Confirms John Boniciolli, Giovanni Chiarelli, Trent Czinner, Vanessa Hicks, Jonathan Rutherford and James Gully report to Iñaki Berroeta (published 2025-03) |
+| R09 | [Woolworths Group](https://www.woolworthsgroup.com.au/content/dam/wwg/investors/asx-announcements/2025/2845180.pdf) | Confirms Annette Karantoni reports to Amanda Bardwell (published 2025-02-04) |
+| R16 | [Fisher & Paykel Healthcare](https://www.fphcare.com/en-gb/corporate/investor/news/fy19/fph-appointment-of-new-cfo/) | Confirms Lyndal York reports to Lewis Gradon (published 2018-10-23) |
+| R18 | [Xero](https://www.xero.com/us/media-releases/us-managing-director-announcement/) | Confirms Jonathan Meltzer reports to Maninder Sawhney (published 2026-07-27) |
+| R20 | [Computershare](https://content-assets.computershare.com/eh96rkuu9740/7o8XHlWTAAprJgmcclpwj9/f9a0eb21ff1610f46b01d6324dd93441/CPU_-_Corporate_Governance_Statement_-_FY25.pdf) | Confirms Nick Oldfield and Dominic Horsley report to Stuart Irving (published 2025-09-22) |
