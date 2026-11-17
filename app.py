@@ -56,6 +56,10 @@ def is_stale(folder):
         if not mine.any():
             return True
     first = pd.read_csv(pred, nrows=1)
+    if folder == "data":            # Benchmark built before the realistic company names
+        import generate_data
+        if not generate_data.is_v2_name(first.company_name[0], first.industry[0]):
+            return True
     return (needed not in pd.read_csv(truth, nrows=1).columns
             or "rule_confidence" not in first.columns
             or first.get("threshold", pd.Series([None])).iloc[0] != MODEL_THRESHOLD)
@@ -695,13 +699,6 @@ if notes:
             st.caption(f"ⓘ Gemini was chosen, but it couldn't be used, so these people were "
                        f"placed by the {f}.")
 
-# ---------------------------------------------------------------- the org chart
-view = co if func == "All" else co[(co.function == func) | (co.level == 1)]
-st.subheader(f"{info.company_name} — {func}")
-# Our own HTML: names and titles are escaped inside org_chart.py before display
-st.iframe(org_chart.render_html(view, show_truth), height=720)
-
-
 def chart_csv(co):
     """The chart as it is on screen now (this threshold, these changes), one row each."""
     def status(r):
@@ -735,13 +732,194 @@ def chart_csv(co):
     }).to_csv(index=False).encode("utf-8-sig")   # with BOM: Excel then reads "→" correctly
 
 
-u1, u2, u3, _ = st.columns([1.2, 1.2, 1.1, 2.5])
-u1.button("Undo last change", icon=":material/undo:", on_click=undo,
-          disabled=not ss.history)
-u2.button("Reset to original", icon=":material/restart_alt:", on_click=reset_all,
-          disabled=not ss.history)
-u3.download_button("Download CSV", chart_csv(co), file_name=f"org_chart_{cid}.csv",
-                   mime="text/csv", icon=":material/download:", on_click="ignore")
+# ---------------------------------------------------------------- tabs: People, Org chart, Reports
+LEVELS = {1: "1 · CEO", 2: "2 · C-level", 3: "3 · VP", 4: "4 · Director", 5: "5 · Manager",
+          6: "6 · Senior", 7: "7 · Individual", 8: "8 · Junior"}
+CHART_BLUE = "#2E6FD8"            # one hue for counts; >= 3:1 contrast on light and dark
+KIND_WORD = {"promotion": "promoted", "demotion": "demoted", "move": "moved (same level)",
+             "change": "title changed"}
+names_by_id = dict(zip(co.employee_id, co.full_name))
+names_by_id.update({v: "Vacant · " + str(co.title[co.employee_id == v].iloc[0])
+                    for v in vacant_ids})          # a vacant seat, named by its title
+# Level and department as the rules read them (title + company context)
+ctx = whatif.in_context(co[~co.employee_id.isin(not_here)])
+co["level_now"] = co.employee_id.map(ctx.level).fillna(co.level)
+co["dept_now"] = co.employee_id.map(ctx.function).fillna(co.function)
+
+
+def person_status(r):
+    """One line for the People table: placed / not placed + reason / left / interim ..."""
+    if r.employee_id in left_ids:
+        to = getattr(r, "left_to", None)
+        return "left" + (f" → {to}" if isinstance(to, str) and to else "")
+    reason = r.reason if isinstance(r.reason, str) and r.reason else "below threshold"
+    parts = ["interim (reports to CEO)" if r.employee_id in interim_ids and pd.notna(r.manager_id)
+             else "placed" if pd.notna(r.manager_id)
+             else "top of company" if reason == "top of company"
+             else f"not placed: {reason}"]
+    if r.employee_id in latest:
+        ch = latest[r.employee_id][0]
+        parts.append(KIND_WORD.get(ch["kind"], "title changed")
+                     + ("" if ch["old_function"] == ch["new_function"]
+                        else f", now in {ch['new_function']}"))
+    tag = getattr(r, "tag", None)
+    if isinstance(tag, str):
+        parts.append(tag)
+    was = getattr(r, "was_under", None)
+    if isinstance(was, str):
+        why = getattr(r, "was_under_why", None)
+        parts.append(f"{why if isinstance(why, str) else 'manager left'} (was under {was})")
+    return " · ".join(parts)
+
+
+everyone = co[~co.employee_id.isin(vacant_ids)].reset_index(drop=True)   # people, not seats
+people_table = pd.DataFrame({
+    "Name": everyone.full_name, "Title": everyone.title.fillna("(no title)"),
+    "Level": everyone.level_now.map(LEVELS), "Department": everyone.dept_now,
+    "Manager": everyone.manager_id.map(names_by_id),
+    "Confidence": everyone.confidence.where(everyone.manager_id.notna()
+                                            & ~everyone.employee_id.isin(left_ids)),
+    "Status": [person_status(r) for r in everyone.itertuples()]})
+ss.setdefault("people_version", 0)
+people_key = f"people_{cid}_{ss.people_version}"
+
+
+def show_in_chart():
+    """A cell was clicked in the People table: if it was a name, open the Org chart tab
+    at that person (like the company names on the front page)."""
+    cells = ss[people_key]["selection"]["cells"]
+    if cells and cells[0][1] == "Name":
+        ss.highlight = ss.people_ids[cells[0][0]]
+        ss.company_tab = "Org chart"
+    ss.people_version += 1         # fresh table next time, so the old click doesn't stick
+
+
+ss.people_ids = everyone.employee_id.tolist()       # row number -> person, for show_in_chart
+tab_people, tab_chart, tab_reports = st.tabs(["People", "Org chart", "Reports"],
+                                             default="Org chart", key="company_tab",
+                                             on_change="rerun")   # so code can switch tabs
+
+with tab_people:
+    st.caption("Everyone in this company. Click a name to see that person in the Org chart "
+               "tab. Search with the magnifying glass (top right of the table), sort by "
+               "clicking a column header.")
+    st.dataframe(people_table, key=people_key, on_select=show_in_chart,
+                 selection_mode="single-cell", hide_index=True, width="stretch", height=560,
+                 placeholder="—",
+                 column_config={"Confidence": st.column_config.NumberColumn(format="%.2f")})
+
+with tab_chart:
+    view = co if func == "All" else co[(co.function == func) | (co.level == 1)]
+    st.subheader(f"{info.company_name} — {func}")
+    pick = ss.get("highlight")
+    pick = pick if pick in set(view.employee_id) else None
+    if pick:
+        h1, h2 = st.columns([4, 1])
+        h1.caption(f"Highlighted: **{names_by_id[pick]}** (picked in the People tab)")
+        h2.button("Clear highlight", on_click=set_flag, args=("highlight", None))
+    # Our own HTML: names and titles are escaped inside org_chart.py before display
+    st.iframe(org_chart.render_html(view, show_truth, pick), height=720)
+    u1, u2, u3, _ = st.columns([1.2, 1.2, 1.1, 2.5])
+    u1.button("Undo last change", icon=":material/undo:", on_click=undo,
+              disabled=not ss.history)
+    u2.button("Reset to original", icon=":material/restart_alt:", on_click=reset_all,
+              disabled=not ss.history)
+    u3.download_button("Download CSV", chart_csv(co), file_name=f"org_chart_{cid}.csv",
+                       mime="text/csv", icon=":material/download:", on_click="ignore")
+
+
+def counts(frame, gone=frozenset(), interim=frozenset(), vacant=frozenset()):
+    """Headline counts of one version of the chart (before or now)."""
+    people = frame[~frame.employee_id.isin(set(gone) | set(vacant))]
+    top = people.reason == "top of company"
+    return {"People": len(people), "Lines drawn": int(people.manager_id.notna().sum()),
+            "Not placed": int((people.manager_id.isna() & ~top).sum()),
+            "Interim under the CEO": int(people.employee_id.isin(interim).sum()),
+            "Vacant positions": len(vacant)}
+
+
+with tab_reports:
+    now = co[~co.employee_id.isin(not_here)]
+    r1, r2 = st.columns(2)
+    with r1:
+        st.markdown("**People per level**")
+        per_level = now.level_now.map(LEVELS).fillna("unknown").value_counts()
+        per_level = per_level.reindex(list(LEVELS.values()) + (   # all 8 levels, 0 if none
+            ["unknown"] if "unknown" in per_level else []), fill_value=0)
+        # Horizontal, so the labels fit; "1 · CEO" ... "8 · Junior" sort top to bottom
+        st.bar_chart(per_level.rename_axis("Level").reset_index(name="People"), x="Level",
+                     y="People", color=CHART_BLUE, horizontal=True, sort=False,
+                     height=max(300, 28 * len(per_level) + 70))
+    with r2:
+        st.markdown("**People per department**")
+        per_dept = now.dept_now.fillna("unknown").value_counts()
+        st.bar_chart(per_dept.rename_axis("Department").reset_index(name="People"),
+                     x="Department", y="People", color=CHART_BLUE, horizontal=True,
+                     sort="-People", height=max(300, 28 * len(per_dept) + 70))  # every label
+    st.markdown("**Reporting lines**")
+    n_now = counts(co, left_ids, interim_ids, vacant_ids)
+    k1, k2, k3 = st.columns(3)
+    k1.metric("Lines drawn", f"{n_now['Lines drawn']:,}")
+    k2.metric("Not placed", f"{n_now['Not placed']:,}",
+              help="No manager drawn: no candidate, several candidates, or confidence below "
+                   "the threshold")
+    k3.metric("Top of company", int((now.reason == "top of company").sum()))
+    gaps = now[now.manager_id.isna() & (now.reason != "top of company")]
+    if len(gaps):
+        why = gaps.reason.fillna("below threshold").replace("", "below threshold")
+        top_why = why.value_counts().head(5)
+        st.markdown("Top reasons for \"not placed\"")
+        st.dataframe(pd.DataFrame({"Reason": top_why.index, "People": top_why.values,
+                                   "Share": top_why.values / len(gaps)}),
+                     hide_index=True, width="stretch",
+                     column_config={"Share": st.column_config.ProgressColumn(
+                         format="percent", min_value=0, max_value=1)})
+    if show_truth and len(sc):            # nothing to check in a new organisation
+        st.markdown("**Accuracy** (vs. " + answer_key + ")")
+        a1, a2, a3 = st.columns(3)
+        a1.metric("Precision", pct(precision))
+        a2.metric("Coverage", pct(coverage, 0))
+        a3.metric("People checked", len(sc),
+                  help=f"{who.capitalize()}; changes you made here are never counted")
+
+    # ------------------------------------------------ Before vs Now (what-if changes)
+    rows = []
+    for lv in events["leavers"]:
+        if lv["company_id"] == cid:
+            rows.append(("left", lv["full_name"], f"moved to {lv['new_company']}"
+                         if lv["new_company"] else "left the company"))
+    for r in tagged.itertuples():
+        where = (f"reports to {names_by_id.get(r.manager_id)}" if pd.notna(r.manager_id)
+                 else "top of company" if r.reason == "top of company" else "not placed")
+        rows.append(("joined" if r.tag.startswith("joined") else "added", r.full_name,
+                     f"{r.title} · {r.tag} · {where}"))
+    for ch in my_changes:
+        detail = f"{ch['old_title']} → {ch['new_title']}"
+        if ch["old_function"] != ch["new_function"]:
+            detail += f" · {ch['old_function']} → {ch['new_function']}"
+        if ch["vacant"]:
+            detail += " · old position left vacant"
+        rows.append((KIND_WORD.get(ch["kind"], "title changed"), ch["full_name"], detail))
+    if rows:
+        st.markdown("**Before vs Now** (your changes, only for you in this browser session)")
+        st.dataframe(pd.DataFrame(rows, columns=["Change", "Person", "Details"]),
+                     hide_index=True, width="stretch")
+        before = (apply_threshold(df[df.company_id == cid], threshold)
+                  if cid not in NEW_ORGS else co.iloc[0:0])
+        # One text row per measure, built in full first: no column changes type later
+        n_before = counts(before)
+        lines = [(k, str(n_before[k]), str(n_now[k]), f"{n_now[k] - n_before[k]:+d}")
+                 for k in n_now]
+        if show_truth:
+            sc0 = scored[scored.company_id == cid]
+            cov0, prec0 = score(apply_threshold(sc0, threshold)) if len(sc0) else (None, None)
+            lines += [("Coverage", pct(cov0, 0), pct(coverage, 0), ""),
+                      ("Precision", pct(prec0), pct(precision), "")]
+        st.dataframe(pd.DataFrame(lines, columns=["", "Before", "Now", "Change"]),
+                     hide_index=True, width="stretch")
+        if show_truth:
+            st.caption("\"Now\" precision and coverage leave out the people you changed and "
+                       "their teams, so they are not exactly comparable.")
 
 # ---------------------------------------------------------------- sources (real companies)
 if REAL or UK:
@@ -758,23 +936,24 @@ if REAL or UK:
             st.markdown(f"- [{s.company_name}: leadership page]({s.url}) — "
                         f"{s.what_it_shows}. Checked {when(s.date_checked)}.")
 
-# ---------------------------------------------------------------- lookups and gaps
-st.subheader("Who does this person report to?")
-person = st.selectbox("Person", co.full_name + " — " + co.title.fillna("(no title)"))
-row = co[(co.full_name + " — " + co.title.fillna("(no title)")) == person].iloc[0]
-chain, cur = [], row
-while pd.notna(cur.manager_id) and len(chain) < 10:
-    edge_conf = cur.confidence                     # confidence of THIS reporting line
-    cur = co[co.employee_id == cur.manager_id].iloc[0]
-    chain.append(f"{cur.full_name} ({cur.title}) — confidence {edge_conf:.2f}")
-if chain:
-    st.write("Reporting chain, bottom to top:")
-    for i, c in enumerate(chain, 1):
-        st.write(f"{i}. {c}")
-else:
-    st.write(f"No manager assigned. Reason: {row.reason or 'below threshold'}")
+# ---------------------------------------------------------------- lookups and gaps (Org chart tab)
+with tab_chart:
+    st.subheader("Who does this person report to?")
+    person = st.selectbox("Person", co.full_name + " — " + co.title.fillna("(no title)"))
+    row = co[(co.full_name + " — " + co.title.fillna("(no title)")) == person].iloc[0]
+    chain, cur = [], row
+    while pd.notna(cur.manager_id) and len(chain) < 10:
+        edge_conf = cur.confidence                     # confidence of THIS reporting line
+        cur = co[co.employee_id == cur.manager_id].iloc[0]
+        chain.append(f"{cur.full_name} ({cur.title}) — confidence {edge_conf:.2f}")
+    if chain:
+        st.write("Reporting chain, bottom to top:")
+        for i, c in enumerate(chain, 1):
+            st.write(f"{i}. {c}")
+    else:
+        st.write(f"No manager assigned. Reason: {row.reason or 'below threshold'}")
 
-st.subheader("People left without a manager")
-st.dataframe(co[co.manager_id.isna() & ~co.employee_id.isin(not_here)][
-    ["full_name", "title", "department", "reason"]],
-             width="stretch", hide_index=True)
+    st.subheader("People left without a manager")
+    st.dataframe(co[co.manager_id.isna() & ~co.employee_id.isin(not_here)][
+        ["full_name", "title", "department", "reason"]],
+                 width="stretch", hide_index=True)

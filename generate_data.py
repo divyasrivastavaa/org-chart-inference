@@ -55,6 +55,60 @@ MORE_LAST = ["O'Brien", "Rossi", "Kowalski", "Tanaka", "Haddad", "Mensah", "Joha
 WORDS = ["Nova", "Blue", "Peak", "Orbit", "Kite", "Harbour", "Quartz", "Summit", "Atlas",
          "Lumen", "Cedar", "Pulse", "Vertex", "Echo", "Maple", "Iron", "Coral", "Zen"]
 SUFFIX = ["Labs", "Systems", "Group", "Health", "Logistics", "Pty Ltd", "Technologies", "Co"]
+# v2 company names: "<word> <industry word> <suffix>", e.g. "Kestrel Health Ltd". Fictional:
+# no word is a well-known brand. They come from their own random generators, so they never
+# move the main `rng`: people, titles and the answer key are the same as with the old names.
+NAME_WORDS = [
+    "Kestrel", "Bluegum", "Northbridge", "Wattle", "Banksia", "Saltbush", "Tallowood",
+    "Brightwater", "Stonefield", "Redgum", "Riverbend", "Eastbrook", "Silverleaf", "Larkspur",
+    "Ashgrove", "Bellbird", "Boronia", "Bramblewood", "Briarwood", "Brookvale", "Coolum",
+    "Copperleaf", "Cormorant", "Crestline", "Driftwood", "Elmstead", "Emberly", "Fairwind",
+    "Fernhill", "Firetail", "Fieldstone", "Galah", "Glenrock", "Greenvale", "Greywater",
+    "Hartwell", "Hawksbill", "Heathcote", "Hillcrest", "Ironleaf", "Kurrajong", "Lakeside",
+    "Lantern", "Lilypilly", "Lorikeet", "Marlowe", "Meadowbank", "Merriwa", "Millbrook",
+    "Mooncrest", "Mosswood", "Myrtle", "Nightjar", "Nullarbor", "Oakridge", "Paperbark",
+    "Pinecrest", "Quillon", "Rainbird", "Ravenwood", "Ridgeback", "Riverstone", "Sandpiper",
+    "Seabreeze", "Shoreline", "Silvereye", "Southwind", "Sparrowhawk", "Springvale",
+    "Stillbrook", "Stringybark", "Summerhill", "Sunbird", "Tamarind", "Thornbury", "Tuart",
+    "Westbrook", "Willowbank", "Windmill", "Woodlark", "Yarrow", "Yellowbox", "Amberley",
+    "Applecross", "Bayview", "Blackbutt", "Bluewren", "Coolabah", "Currawong", "Dunmore",
+    "Eaglehawk", "Glenfern", "Harrowgate", "Ironstone", "Kingsbury", "Mallee", "Marram",
+    "Moorhen", "Pebblebrook", "Quenda", "Rivergum", "Saltwater", "Wagtail"]
+# More first words, so that no first word repeats within a seed: "Hazel" + "brook" ...
+NAME_STARTS = ["Amber", "Ash", "Bell", "Birch", "Bramble", "Briar", "Clover", "Copper", "Crane",
+               "Elm", "Fern", "Finch", "Glen", "Hazel", "Heron", "Holly", "Lark", "Linden",
+               "Marsh", "Moss", "Oak", "Pine", "Quill", "Raven", "Reed", "Rowan", "Sage",
+               "Thistle", "Willow", "Wren"]
+NAME_ENDS = ["wood", "field", "brook", "vale", "ridge", "crest", "stone", "water", "leaf",
+             "bank", "hill", "mere", "ford", "haven", "dale", "wick"]
+NOT_NAMES = {"Hollywood", "Pinewood", "Copperfield", "Ashford", "Hazelwood", "Glendale",
+             "Oakwood", "Ashfield", "Elmwood", "Glenwood"}   # famous names or places
+FIRST_WORDS = [w for w in dict.fromkeys(NAME_WORDS + [a + b for a in NAME_STARTS
+                                                      for b in NAME_ENDS])
+               if w not in NOT_NAMES]
+WORD_INDEX = {w: i for i, w in enumerate(FIRST_WORDS)}
+INDUSTRY_WORDS = {   # one list per industry, no word in two lists, so names never repeat
+    "SaaS": ["Software", "Cloud", "Systems", "Digital", "Labs", "Technologies", "Analytics",
+             "Networks"],
+    "Fintech": ["Finance", "Payments", "Capital", "Lending", "Wealth", "Ledger", "Money", "Pay"],
+    "Healthcare": ["Health", "Medical", "Care", "Clinics", "Diagnostics", "Therapeutics",
+                   "Biotech", "Wellness"],
+    "Retail": ["Retail", "Stores", "Outfitters", "Market", "Goods", "Trading", "Brands",
+               "Emporium"],
+    "Manufacturing": ["Manufacturing", "Industries", "Engineering", "Fabrication", "Works",
+                      "Materials", "Components", "Metals"],
+    "Logistics": ["Logistics", "Freight", "Transport", "Shipping", "Distribution", "Couriers",
+                  "Cargo", "Haulage"],
+    "Education": ["Education", "Learning", "Academy", "Institute", "Schools", "Tutoring",
+                  "Training", "College"],
+    "Media": ["Media", "Studios", "Broadcasting", "Publishing", "Pictures", "Productions",
+              "Creative", "Entertainment"]}
+NAME_SUFFIX = ["Ltd", "Pty Ltd", "Group", "Inc"]
+# Within a seed every company gets a different first word (a fixed shuffle per seed). The
+# industry word is picked by (first word + seed) % 8, so two seeds with a different seed % 8
+# never make the same name: the app (42), held-out (7) and training (1) seeds give 2, 7, 1.
+NAME_SLOTS = 8
+names, name_rng, name_seed = [], random.Random(), 0      # set by main()
 INDUSTRIES = ["SaaS", "Fintech", "Healthcare", "Retail", "Manufacturing",
               "Logistics", "Education", "Media"]
 LOCATIONS = ["Sydney", "Melbourne", "Brisbane", "Bengaluru", "London", "Singapore"]
@@ -179,12 +233,36 @@ def real_world_title(func, level, team):
     return clean, False
 
 
+def first_word_order(seed):
+    """This seed's first words, one per company, in a fixed order (same every run)."""
+    words = FIRST_WORDS[:]
+    random.Random(f"company-names-{seed}").shuffle(words)
+    return words
+
+
+def company_name(industry):
+    """The next v2 name: "<first word> <industry word> <suffix>"."""
+    word = names.pop(0)
+    second = INDUSTRY_WORDS[industry][(WORD_INDEX[word] + name_seed) % NAME_SLOTS]
+    return f"{word} {second} {name_rng.choice(NAME_SUFFIX)}"
+
+
+def is_v2_name(name, industry):
+    """True for a name made by company_name() (the app uses it to spot old data)."""
+    parts = str(name).split(" ")
+    return len(parts) >= 3 and parts[0] in WORD_INDEX \
+        and parts[1] in INDUSTRY_WORDS.get(industry, [])
+
+
 def build_company(cid, used_names):
     size, industry, hq = pick_size(), rng.choice(INDUSTRIES), rng.choice(LOCATIONS)
+    # The v1 name. v2 still draws it, so every later draw of `rng` stays exactly the same.
     name = f"{rng.choice(WORDS)}{rng.choice(WORDS).lower()} {rng.choice(SUFFIX)}"
     while name in used_names:
         name += " " + rng.choice(["AU", "Global", "Holdings"])
     used_names.add(name)
+    if V2:                          # realistic name, from its own generators
+        name = company_name(industry)
     people = []
 
     def add(func, level, team, manager_id):
@@ -321,9 +399,11 @@ def make_messy(df):
 
 
 def main(version=2, seed=SEED, out=OUT):
-    global V2, rng
+    global V2, rng, names, name_rng, name_seed
     V2 = version == 2
     rng = random.Random(seed)       # private: other code in the process can't disturb it
+    names, name_rng, name_seed = (first_word_order(seed),
+                                  random.Random(f"company-suffix-{seed}"), seed)
     out = Path(out)
     out.mkdir(parents=True, exist_ok=True)
     used, rows = set(), []

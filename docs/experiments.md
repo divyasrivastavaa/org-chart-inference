@@ -143,3 +143,19 @@ Fixes in `infer.py`:
 
 Regression check: Benchmark seed 42 (95.2% / 62.7%, 4,727 wrong, Brier 0.0433), seed 7
 (95.4% / 63.7%, 4,411 wrong, Brier 0.0420) and ASX/NZX (36 of 36, 84%) are **unchanged**.
+
+## E7. Realistic Benchmark company names (17 Nov 2026)
+Not a model change. Benchmark names were odd ("Atlasatlas Pty Ltd"). v2 names are now
+"<word> <industry word> <suffix>" (e.g. "Kestrel Health Ltd"): 564 fictional first words
+(100 hand-picked + compounds like "Heronbrook", minus famous ones), 8 industry words per
+industry, Ltd / Pty Ltd / Group / Inc. Within a seed no first word repeats; the industry
+word depends on seed % 8, so all 1,500 names of seeds 42, 7 and 1 are different. No doubled
+words, no well-known brand words. `--v1` keeps its old names (byte-for-byte promise).
+
+The names come from separate random generators; the old name is still drawn from the main
+generator and thrown away, so every other draw is unchanged. Checked:
+- employees.csv, truth.csv and predictions.csv of seeds 42 and 7 (and the seed-1 training
+  data): every column except company_name is identical.
+- `evaluate.py` output for seed 42 and seed 7 is identical line for line: 95.2% / 62.7%,
+  4,727 wrong, Brier 0.0433; 95.4% / 63.7%, 4,411 wrong, Brier 0.0420.
+- Retrained confidence tree: `models/` unchanged. ASX/NZX and UK data don't use the generator.

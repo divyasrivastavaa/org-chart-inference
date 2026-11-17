@@ -17,7 +17,7 @@ reporting line, and leaves the manager blank (with a reason) when it isn't sure.
   is worse than no line. Everyone without a line is listed with the reason.
 - **Measures itself** against an answer key on three datasets: 500 generated companies, 20
   real ASX/NZX leadership teams and 12 real UK government organisations.
-- **Lets you try changes** in the app: add people, remove people, and see how the chart
+- **Lets you try changes** in the app: add, remove or promote people, and see how the chart
   reacts. An optional Gemini judge can place people instead of the rules.
 
 ## How it works
@@ -106,6 +106,24 @@ threshold 0.7):
   - **Never commit the key.** `secrets.toml` is in `.gitignore`.
   - Without a key, the app falls back to the rules and says so.
 
+## Company page
+
+Click a company's name on the front page. Above three tabs are the buttons (Back, Add,
+Remove, Promote) and the company's numbers (employees, industry, coverage, precision):
+
+- **Org chart** (opens first): the expandable chart. Click a number to open that person's
+  team; everyone without a line is in "Not placed" with the reason.
+- **People:** everyone in the company with title, level, department, manager, confidence and
+  status (placed, not placed + reason, interim, left, promoted, manually added). Search and
+  sort it; **click a name** to jump to the Org chart tab with that person highlighted.
+- **Reports:** people per level and per department, lines drawn vs not placed with the top
+  reasons, precision and coverage (when "Show accuracy" is on), and **Before vs Now** after
+  any what-if change.
+
+| Org chart tab | People tab | Reports tab |
+|---|---|---|
+| ![Company page, Org chart tab: the CEO's direct reports](docs/images/company_page.png) | ![People tab: everyone with level, department, manager, confidence and status](docs/images/people_tab.png) | ![Reports tab: people per level and department, reasons for not placed, accuracy](docs/images/reports_tab.png) |
+
 ## What-if
 
 On any company page:
@@ -123,17 +141,20 @@ On any company page:
   card keeps their old place and their team stays under it; otherwise their team stays with
   them if it still fits, or is re-placed as for a leaver. Blocked if the title can't be
   read, would make a second CEO, or hasn't changed. Never counted in precision.
+- **Before vs Now** (Reports tab): a table of what changed (who left and where to, who was
+  added, who was promoted or moved) and the counts before and now: people, lines drawn, not
+  placed, interim, vacant positions, coverage and precision.
 - **Undo last change**, **Reset to original** and **Download CSV** (the chart as shown).
 - **Only for you:** everything runs **in memory, per visitor**. Nothing is saved, and other
   visitors and the results above don't change.
 
-| Add people | After removing the CTO ("Moving to: Google") | After promoting a Director to VP (old position vacant) |
+| Add people | After removing the CTO ("Moving to: Google") | After promoting a Director to VP: Before vs Now |
 |---|---|---|
-| ![Add people popup](docs/images/add_people.png) | ![Company after the CTO left: faded card, team interim under the CEO](docs/images/remove_cto.png) | ![Company after a promotion: the card lists what changed, a dashed vacant card keeps the old place](docs/images/promote.png) |
+| ![Add people popup](docs/images/add_people.png) | ![Company after the CTO left: faded card, team interim under the CEO](docs/images/remove_cto.png) | ![Reports tab after a promotion: the change and the counts before and now](docs/images/promote.png) |
 
-| A company page (Benchmark) | A UK organisation (DWP) | The Docs popup |
-|---|---|---|
-| ![Company page with the expandable org chart](docs/images/company_page.png) | ![Department for Work and Pensions: Permanent Secretary and Directors General](docs/images/uk_organisation.png) | ![Docs popup with the flow diagram](docs/images/docs_popup.png) |
+| A UK organisation (DWP) | The Docs popup |
+|---|---|
+| ![Department for Work and Pensions: Permanent Secretary and Directors General](docs/images/uk_organisation.png) | ![Docs popup with the flow diagram](docs/images/docs_popup.png) |
 
 The DWP screenshot shows the Permanent Secretary and Directors General placed correctly. Its
 coverage (4%) is far below the UK average: DWP has only 10 units for 337 posts. So each

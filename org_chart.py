@@ -12,8 +12,9 @@ import json
 import pandas as pd
 
 
-def build_payload(view, show_truth):
-    """view = one company's rows (after the threshold). Returns a JSON-able dict."""
+def build_payload(view, show_truth, highlight=None):
+    """view = one company's rows (after the threshold). Returns a JSON-able dict.
+    highlight = an employee_id to open the chart at and outline (from the People tab)."""
     ids = set(view.employee_id)
     nodes = {}
     for r in view.itertuples():
@@ -86,11 +87,12 @@ def build_payload(view, show_truth):
     return {"nodes": nodes, "roots": roots, "unplaced": unplaced, "truth": bool(show_truth),
             "vacancies": any(n["v"] for n in nodes.values()),
             "leavers": any(n["lf"] for n in nodes.values()),
-            "unchecked": any(n["u"] for n in nodes.values())}
+            "unchecked": any(n["u"] for n in nodes.values()),
+            "hl": highlight if highlight in nodes else None}
 
 
-def render_html(view, show_truth):
-    data = json.dumps(build_payload(view, show_truth), separators=(",", ":"))
+def render_html(view, show_truth, highlight=None):
+    data = json.dumps(build_payload(view, show_truth, highlight), separators=(",", ":"))
     return TEMPLATE.replace("__DATA__", data.replace("</", "<\\/"))
 
 
@@ -119,6 +121,7 @@ TEMPLATE = r"""
   .card.vacant .avatar { background:#b8bec9 !important; }
   .left { color:#a14b00; font-weight:600; }
   .card.open { outline:2px solid var(--accent); outline-offset:1px; }
+  .card.hl { outline:3px solid var(--accent); outline-offset:2px; background:#eef3fc; }
   .avatar { flex:0 0 34px; height:34px; border-radius:50%; color:#fff; font-size:13px;
             font-weight:600; display:flex; align-items:center; justify-content:center; }
   .body { min-width:0; flex:1; }
@@ -153,6 +156,14 @@ const state = { main: [], np: [] };            // expanded path per section
 // With two people at the top, the first one who has a team is opened.
 const ceo = D.roots.find(id => N[id].k.length);
 if (ceo) state.main.push(ceo);
+// A person picked in the People tab: open every manager above them, in the right section
+if (D.hl) {
+  const chain = [];
+  for (let p = D.hl; N[p].m && chain.length < 100; p = N[p].m) chain.unshift(N[p].m);
+  const top = chain.length ? chain[0] : D.hl;
+  const sec = D.roots.includes(top) ? "main" : "np";
+  if (chain.length || sec === "np") state[sec] = chain;
+}
 const fmt = n => n.toLocaleString("en-US");
 
 document.getElementById("np-hint").textContent =
@@ -174,7 +185,7 @@ function card(id, sec, rowIdx) {
   const n = N[id], el = document.createElement("div");
   const open = state[sec][rowIdx] === id;
   el.className = "card" + (n.lf ? " gone" : "") +           // every card the same colour
-                 (n.v ? " vacant" : "") + (open ? " open" : "");
+                 (n.v ? " vacant" : "") + (open ? " open" : "") + (id === D.hl ? " hl" : "");
   el.dataset.id = id;
   let meta;
   if (n.lf) meta = '<span class="left">' + esc(n.lf) + '</span>';
@@ -269,6 +280,8 @@ function toggle(sec, rowIdx, id) {
 }
 
 render("main"); render("np");
+const picked = document.querySelector(".card.hl");
+if (picked) picked.scrollIntoView({ block: "center" });
 window.addEventListener("resize", () => { drawLinks("main"); drawLinks("np"); });
 </script>
 """
