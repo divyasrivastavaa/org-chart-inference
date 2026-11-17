@@ -28,6 +28,8 @@ def build_payload(view, show_truth):
         if getattr(r, "judge", None) == "Gemini":                # what-if: placed by Gemini
             tag = (tag + " · " if isinstance(tag, str) else "") + "placed by Gemini"
         was_under = getattr(r, "was_under", None)                # their manager left
+        why = getattr(r, "was_under_why", None)                  # ... or was promoted
+        changed = getattr(r, "change_note", None)                # title change, one per line
         # Can this line be checked? Not for empty positions, people added by hand, or real
         # people without a written source (app.py sets "checkable"; default yes)
         checkable = str(getattr(r, "checkable", True)) == "True" and not vacant and not left
@@ -45,6 +47,8 @@ def build_payload(view, show_truth):
             if left else None,
             "tag": tag if isinstance(tag, str) else "",
             "wu": was_under if isinstance(was_under, str) else "",
+            "wy": why if isinstance(why, str) else "manager left",
+            "ch": changed.split("\n") if isinstance(changed, str) else [],
             "it": str(getattr(r, "interim", False)) == "True",   # interim: under the CEO
             "k": [], "tot": 0,
         }
@@ -93,8 +97,7 @@ def render_html(view, show_truth):
 TEMPLATE = r"""
 <style>
   :root { --line:#9aa3b2; --ink:#1f2937; --muted:#6b7280; --card:#ffffff; --edge:#d6dae1;
-          --ok-bg:#e9f7ef; --ok-edge:#3f9b62;
-          --pill:#eef1f6; --accent:#2E6FD8; --none-bg:#f1f2f4; }
+          --pill:#eef1f6; --accent:#2E6FD8; }
   * { box-sizing:border-box; }
   body { margin:0; font-family:"Source Sans Pro",-apple-system,"Segoe UI",Roboto,sans-serif;
          color:var(--ink); background:#fff; }
@@ -109,8 +112,6 @@ TEMPLATE = r"""
   .card { width:210px; background:var(--card); border:1px solid var(--edge); border-radius:10px;
           padding:9px 10px 8px; display:flex; gap:9px; align-items:flex-start;
           box-shadow:0 1px 2px rgba(0,0,0,.05); }
-  .card.ok { background:var(--ok-bg); border-color:var(--ok-edge); }
-  .card.none { background:var(--none-bg); }               /* no manager drawn */
   .card.gone { opacity:.5; border-style:dashed; box-shadow:none; }   /* left the company */
   .card.vacant { background:#f1f2f4; border:1.5px dashed #8a93a3; box-shadow:none; }
   .card.vacant .name { color:var(--muted); font-style:italic; }
@@ -126,6 +127,8 @@ TEMPLATE = r"""
   .title { font-size:12px; color:var(--muted); line-height:1.25; max-height:2.5em;
            overflow:hidden; }
   .meta { font-size:11px; color:var(--muted); margin-top:3px; }
+  .change { font-size:11px; color:var(--ink); margin-top:4px; padding-top:4px;
+            border-top:1px dashed var(--edge); line-height:1.35; }
   .pill { margin-top:6px; border:0; background:var(--pill); color:var(--ink); border-radius:999px;
           padding:2px 9px; font-size:12px; cursor:pointer; display:inline-flex; gap:5px;
           align-items:center; }
@@ -134,13 +137,9 @@ TEMPLATE = r"""
           border-bottom:1.6px solid currentColor; transform:rotate(45deg) translateY(-2px); }
   .chev.up { transform:rotate(-135deg) translate(-1px,-1px); }
   svg.links { position:absolute; left:0; top:0; pointer-events:none; z-index:0; overflow:visible; }
-  .legend { font-size:12px; color:var(--muted); margin:2px 4px 0; }
-  .sw { display:inline-block; width:10px; height:10px; border-radius:3px; margin:0 4px 0 10px;
-        vertical-align:-1px; border:1px solid; }
   .empty { color:var(--muted); font-size:13px; padding:6px 4px; }
   hr { border:0; border-top:1px solid #e5e7eb; margin:6px 0; }
 </style>
-<div class="legend" id="legend"></div>
 <div class="section" id="main"><h4>Org chart <span class="hint">· click a number to see that
   person's team</span></h4><div class="tree"></div></div>
 <hr>
@@ -156,13 +155,6 @@ const ceo = D.roots.find(id => N[id].k.length);
 if (ceo) state.main.push(ceo);
 const fmt = n => n.toLocaleString("en-US");
 
-document.getElementById("legend").innerHTML = 'Line to manager:' +
-  (D.truth ? '<span class="sw" style="background:var(--ok-bg);border-color:var(--ok-edge)"></span>matches the answer key' : '') +
-  '<span class="sw" style="background:var(--none-bg);border-color:var(--edge)"></span>no manager drawn';
-if (D.leavers) document.getElementById("legend").innerHTML +=
-  '<span class="sw" style="background:#fff;border:1px dashed var(--edge);opacity:.5"></span>left the company';
-if (D.vacancies) document.getElementById("legend").innerHTML +=
-  '<span class="sw" style="background:#f1f2f4;border:1.5px dashed #8a93a3"></span>vacant position (person left)';
 document.getElementById("np-hint").textContent =
   "· " + fmt(D.unplaced.length) + " people without a manager (not confident enough to draw a line)";
 
@@ -181,9 +173,7 @@ function esc(s) {
 function card(id, sec, rowIdx) {
   const n = N[id], el = document.createElement("div");
   const open = state[sec][rowIdx] === id;
-  const unplaced = !n.m && n.l !== 1 && !n.lf && !n.v;
-  el.className = "card" + (n.ok === true ? " ok" : "") +     // wrong lines: no colour
-                 (unplaced ? " none" : "") + (n.lf ? " gone" : "") +
+  el.className = "card" + (n.lf ? " gone" : "") +           // every card the same colour
                  (n.v ? " vacant" : "") + (open ? " open" : "");
   el.dataset.id = id;
   let meta;
@@ -195,7 +185,7 @@ function card(id, sec, rowIdx) {
   if (n.wu && n.it && n.m)
     meta = '<span class="left">interim</span> · reports to CEO · was under ' + esc(n.wu) +
            " · " + meta;
-  else if (n.wu) meta = '<span class="left">manager left</span> · was under ' + esc(n.wu) + " · " + meta;
+  else if (n.wu) meta = '<span class="left">' + esc(n.wy) + '</span> · was under ' + esc(n.wu) + " · " + meta;
   else if (n.m && N[n.m].v) meta = '<span class="left">manager left</span> · ' + meta;
   if (n.tag) meta += " · " + esc(n.tag);
   el.innerHTML =
@@ -203,7 +193,9 @@ function card(id, sec, rowIdx) {
     (n.v ? "?" : esc(initials(n.n))) + '</div>' +
     '<div class="body"><div class="name" title="' + esc(n.n) + '">' + esc(n.n) + '</div>' +
     '<div class="title" title="' + esc(n.t) + '">' + esc(n.t) + '</div>' +
-    '<div class="meta">' + meta + '</div></div>';
+    '<div class="meta">' + meta + '</div>' +
+    (n.ch.length ? '<div class="change">' + n.ch.map(esc).join("<br>") + '</div>' : "") +
+    '</div>';
   if (n.k.length) {
     const b = document.createElement("button");
     b.className = "pill";

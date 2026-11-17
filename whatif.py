@@ -14,6 +14,10 @@ copied, changed and re-run through infer.predict(), the normal inference.
   their function, goes under the CEO as "interim" (confidence INTERIM_CONFIDENCE, never
   scored). No single CEO -> they keep waiting for a new manager.
 - A leaver whose "moving to" is a company in the same data is added there with their title.
+- A title change keeps the person and re-places them by the normal rules. With "leave old
+  position vacant", a dashed vacant card keeps their old place and their old reports stay
+  under it. Without it, the reports stay under the person if that still fits (same
+  function, still more senior), otherwise they are re-placed like a leaver's team.
 (scripts/leavers.csv, used when data is built, still uses leavers.py: vacant cards.)
 """
 import pandas as pd
@@ -25,7 +29,7 @@ INTERIM_CONFIDENCE = 0.75
 
 
 def empty():
-    return {"leavers": [], "added": [], "new_orgs": []}
+    return {"leavers": [], "added": [], "new_orgs": [], "changes": []}
 
 
 def leaver(company_id, employee_id, full_name, moving_to, former_manager, reports,
@@ -46,10 +50,67 @@ def person(company_id, full_name, title, department="", company_name=None, judge
             "company_name": company_name, "judge": judge}
 
 
+def change(company_id, employee_id, full_name, old_title, new_title, vacant, old, new,
+           old_manager, old_manager_name, old_confidence, reports):
+    """A title change. old / new = (level, function) as the rules read them in this
+    company. old_manager, old_confidence and reports ({id: confidence}) are the chart at
+    the moment of the change, so a vacant card can keep the old place."""
+    kind = ("change" if pd.isna(old[0]) or pd.isna(new[0])
+            else "promotion" if new[0] < old[0] else "demotion" if new[0] > old[0]
+            else "move")
+    num = lambda x: None if pd.isna(x) else int(x)     # noqa: E731  (plain ints for undo)
+    return {"company_id": company_id, "employee_id": employee_id, "full_name": full_name,
+            "old_title": old_title if isinstance(old_title, str) else None,
+            "new_title": new_title.strip(), "vacant": bool(vacant),
+            "old_level": num(old[0]), "new_level": num(new[0]),
+            "old_function": old[1], "new_function": new[1], "kind": kind,
+            "old_manager": old_manager if isinstance(old_manager, str) else None,
+            "old_manager_name": old_manager_name,
+            "old_confidence": float(old_confidence) if pd.notna(old_confidence) else 0.0,
+            "reports": {k: float(v) for k, v in reports.items()}}
+
+
+def in_context(co, employee_id=None, new_title=None):
+    """Level and function of everyone in one company as the rules see them (title +
+    company context), optionally with one person's title replaced. Indexed by employee_id."""
+    co = co[["employee_id", "company_name", "title", "department"]].copy()
+    if employee_id is not None:
+        co.loc[co.employee_id == employee_id, "title"] = new_title
+    parsed = co.apply(lambda r: infer.parse_title(r.title, r.department), axis=1)
+    co[["level", "function", "team", "is_contractor"]] = pd.DataFrame(parsed.tolist(),
+                                                                      index=co.index)
+    for c in ("team", "function"):
+        co[c] = co[c].astype(object).where(co[c].notna(), None)
+    return infer.fix_with_company_context(co).set_index("employee_id")[["level", "function"]]
+
+
+def check_title(co, employee_id, new_title):
+    """None if the new title can be used, else the warning to show.
+    co = the people working in this company now."""
+    new = new_title.strip()
+    old = co.loc[co.employee_id == employee_id, "title"].iloc[0]
+    if isinstance(old, str) and (old.strip().lower() == new.lower()
+                                 or infer.normalise(old) == infer.normalise(new)):
+        return "The new title is the same as the old one."
+    level, function = infer.parse_title(new, None)[:2]
+    ctx = in_context(co, employee_id, new)
+    if (level == 7 and function is None) or pd.isna(ctx.level[employee_id]) \
+            or ctx.function[employee_id] is None:
+        return (f"\"{new}\" can't be read by our rules (no level or department we know). "
+                "Try a title like \"VP Engineering\" or \"Marketing Manager\".")
+    others = ctx[(ctx.level == 1) & (ctx.index != employee_id)]
+    if ctx.level[employee_id] == 1 and len(others):
+        name = co.set_index("employee_id").full_name[others.index[0]]
+        return (f"\"{new}\" would make a second CEO, but {name} already runs this company. "
+                "Change their title first.")
+    return None
+
+
 def touched(emp, events):
     """IDs of all companies whose chart changes (old and new company of a leaver)."""
     by_name = dict(zip(emp.company_name.str.lower(), emp.company_id))
     out = {a["company_id"] for a in events["added"]}
+    out |= {c["company_id"] for c in events.get("changes", [])}
     for lv in events["leavers"]:
         out.add(lv["company_id"])
         if lv["new_company"].lower() in by_name:
@@ -105,6 +166,11 @@ def apply(emp, events, judge=None):
             title = sub.loc[sub.employee_id == lv["employee_id"], "title"].iloc[0]
             old = sub.loc[sub.employee_id == lv["employee_id"], "company_name"].iloc[0]
             sub = add_row(sub, target, lv["full_name"], title, None, f"joined from {old}")
+    # 2b. Title changes, in order (also on the person's exact duplicate row, if any)
+    changes = events.get("changes", [])
+    for ch in changes:
+        rows = sub.employee_id.isin([ch["employee_id"], ch["employee_id"] + "-DUP"])
+        sub.loc[rows, "title"] = ch["new_title"]
     # 3. Take leavers out (and their duplicate rows), re-run the normal inference
     gone_ids = {lv["employee_id"] for lv in events["leavers"]}
     is_gone = sub.employee_id.isin(gone_ids | {e + "-DUP" for e in gone_ids})
@@ -126,6 +192,34 @@ def apply(emp, events, judge=None):
     for lv in events["leavers"]:
         mine = pred.employee_id.isin(lv["reports"]) & (pred.get("left") != True)  # noqa: E712
         pred.loc[mine, "was_under"] = lv["full_name"]
+    pred["was_under_why"] = None                      # None = "manager left"
+    # 5b. Title changes: the old direct reports (unless they changed title later themselves)
+    here = pred.left.astype(str) != "True" if "left" in pred else pd.Series(True, pred.index)
+    ctx = {}
+    for i, ch in enumerate(changes):
+        later = {c["employee_id"] for c in changes[i + 1:]}
+        why = {"promotion": "manager promoted", "demotion": "manager demoted",
+               "move": "manager moved"}.get(ch["kind"], "manager changed role")
+        for eid, conf in ch["reports"].items():
+            row = (pred.employee_id == eid) & here
+            if eid in later or not row.any():
+                continue
+            pred.loc[row, ["was_under", "was_under_why"]] = [ch["full_name"], why]
+            if ch["vacant"]:                          # stays under the vacant card
+                pred.loc[row, ["pred_manager_id", "confidence", "reason"]] = \
+                    [f"{ch['employee_id']}-VAC{i + 1}", conf, ""]
+                continue
+            if ch["employee_id"] in gone_ids:         # the person left later: leaver rules
+                continue
+            cid = ch["company_id"]
+            if cid not in ctx:
+                ctx[cid] = in_context(pred[here & (pred.company_id == cid)])
+            lvl, func = ctx[cid].loc[eid] if eid in ctx[cid].index else (None, None)
+            if func == ch["new_function"] and pd.notna(lvl) and ch["new_level"] is not None \
+                    and ch["new_level"] < lvl:        # still fits: stays under the person
+                pred.loc[row, ["pred_manager_id", "confidence", "reason"]] = \
+                    [ch["employee_id"], conf, ""]
+            # otherwise: the rules' new answer stands (and interim below, if needed)
     # 6. Interim under the CEO: the rules found no manager AND nobody more senior is left in
     #    the person's function (e.g. the CTO left: the engineering VPs have no one above)
     pred["interim"] = False
@@ -172,4 +266,23 @@ def apply(emp, events, judge=None):
                         [a["manager_id"], a["confidence"], "Gemini: " + a["reason"], "Gemini"]
                     if "interim" in pred:
                         pred.loc[row, "interim"] = False
+    # 8. Vacant cards for title changes: the old title at the old place (never scored)
+    vacant = []
+    for i, ch in enumerate(changes):
+        src = pred[pred.employee_id == ch["employee_id"]]
+        if not ch["vacant"] or src.empty:
+            continue
+        r = src.iloc[0].copy()
+        r[:] = None
+        for c in ("company_id", "company_name", "industry", "department"):
+            r[c] = src.iloc[0][c]
+        r["employee_id"], r["full_name"] = f"{ch['employee_id']}-VAC{i + 1}", "Vacant"
+        r["title"], r["level"], r["function"] = (ch["old_title"], ch["old_level"],
+                                                 ch["old_function"])
+        r["pred_manager_id"], r["confidence"] = ch["old_manager"], ch["old_confidence"]
+        r["reason"], r["vacant"], r["interim"] = "vacant position", True, False
+        r["vacancy_note"] = f"was {ch['full_name']}, now {ch['new_title']}"
+        vacant.append(r)
+    if vacant:
+        pred = pd.concat([pred, pd.DataFrame(vacant)], ignore_index=True)
     return pred

@@ -122,7 +122,7 @@
   <rect class="box green" x="660" y="500" width="320" height="118" rx="8"/>
   <text class="b" x="676" y="524">What-if</text>
   <text class="m" x="744" y="524">whatif.py</text>
-  <text class="t" x="676" y="544">add people · remove people</text>
+  <text class="t" x="676" y="544">add · remove · promote or change title</text>
   <text class="t" x="676" y="562">a leaver’s team moves to the CEO as interim</text>
   <text class="t" x="676" y="578">if no one senior is left (confidence 0.75)</text>
   <text class="t" x="676" y="598">in memory, per visitor, never saved</text>

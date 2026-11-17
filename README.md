@@ -7,7 +7,7 @@ reporting line, and leaves the manager blank (with a reason) when it isn't sure.
 *(Free hosting sleeps when idle. If you see "Yes, get this app back up!", click it and allow
 2–3 minutes while the data is rebuilt.)*
 
-![Front page: overall numbers and the table of all 532 companies](docs/images/front_page.png)
+![Front page: overall numbers and the table of all 532 companies, largest first](docs/images/front_page.png)
 
 ## What it does
 
@@ -117,13 +117,19 @@ On any company page:
   ("Google"). Their card stays, faded, saying "Left → Google", and their team is placed
   again. If nobody more senior is left in that function, the team **moves to the CEO as
   interim** (confidence 0.75, never scored).
+- **Promote / change title:** give someone a new title. They stay, are placed again by the
+  rules, and their card shows what changed (title, level: promotion / move / demotion,
+  department, manager). With **Leave old position vacant** (on by default) a dashed vacant
+  card keeps their old place and their team stays under it; otherwise their team stays with
+  them if it still fits, or is re-placed as for a leaver. Blocked if the title can't be
+  read, would make a second CEO, or hasn't changed. Never counted in precision.
 - **Undo last change**, **Reset to original** and **Download CSV** (the chart as shown).
 - **Only for you:** everything runs **in memory, per visitor**. Nothing is saved, and other
   visitors and the results above don't change.
 
-| Add people | After removing the CTO ("Moving to: Google") |
-|---|---|
-| ![Add people popup](docs/images/add_people.png) | ![Company after the CTO left: faded card, team interim under the CEO](docs/images/remove_cto.png) |
+| Add people | After removing the CTO ("Moving to: Google") | After promoting a Director to VP (old position vacant) |
+|---|---|---|
+| ![Add people popup](docs/images/add_people.png) | ![Company after the CTO left: faded card, team interim under the CEO](docs/images/remove_cto.png) | ![Company after a promotion: the card lists what changed, a dashed vacant card keeps the old place](docs/images/promote.png) |
 
 | A company page (Benchmark) | A UK organisation (DWP) | The Docs popup |
 |---|---|---|

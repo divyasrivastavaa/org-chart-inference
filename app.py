@@ -181,6 +181,7 @@ ss = st.session_state
 ss.setdefault("table_version", 0)
 ss.setdefault("whatif", whatif.empty())
 ss.whatif.setdefault("new_orgs", [])
+ss.whatif.setdefault("changes", [])
 ss.setdefault("history", [])       # earlier versions of ss.whatif, for "Undo last change"
 ss.setdefault("datasets", list(DATASETS))
 ss.datasets = ss.datasets          # keep the dataset buttons' choice while a company is open
@@ -383,6 +384,43 @@ def remove_people_dialog(cid, co, not_here):
         st.rerun()
 
 
+@st.dialog("Promote / change title", width="large",
+           on_dismiss=lambda: set_flag("changing", False))
+def change_title_dialog(cid, co, not_here):
+    people = co[~co.employee_id.isin(not_here)]
+    label = dict(zip(people.employee_id,
+                     people.full_name + " — " + people.title.fillna("(no title)")))
+    eid = st.selectbox("Who?", list(label), format_func=label.get, index=None,
+                       placeholder="Pick a person")
+    new_title = st.text_input("New job title", placeholder="e.g. VP Engineering")
+    vacant = st.checkbox("Leave old position vacant", value=True,
+                         help="On: a dashed vacant card keeps their old place and their team "
+                              "stays under it. Off: their team stays with them if that still "
+                              "fits, otherwise it is re-placed like a leaver's team.")
+    st.caption("The person stays, with the new title, and is placed again by the normal "
+               "rules. Never counted in precision. Only for you, in this browser session: "
+               "nothing is saved.")
+    if not st.button("Apply change", type="primary", disabled=not eid or not new_title.strip()):
+        return
+    problem = whatif.check_title(people, eid, new_title)
+    if problem:
+        st.warning(problem)
+        return
+    row = people[people.employee_id == eid].iloc[0]
+    old = whatif.in_context(people).loc[eid]
+    new = whatif.in_context(people, eid, new_title.strip()).loc[eid]
+    team = people[people.manager_id == eid]
+    names = dict(zip(co.employee_id, co.full_name))
+    remember()
+    ss.whatif["changes"].append(whatif.change(
+        cid, eid, row.full_name, row.title, new_title, vacant,
+        (old.level, old.function), (new.level, new.function), row.manager_id,
+        names.get(row.manager_id), row.confidence if pd.notna(row.manager_id) else 0.0,
+        dict(zip(team.employee_id, team.confidence))))
+    ss.changing = False
+    st.rerun()
+
+
 # ---------------------------------------------------------------- sidebar
 st.sidebar.selectbox("Company", [""] + list(company_label), key="company_select",
                      format_func=lambda c: company_label.get(c, "All companies"))
@@ -392,7 +430,7 @@ threshold = st.sidebar.slider("Confidence threshold", 0.5, 1.0, MODEL_THRESHOLD,
                                    "as costing about 2.3 times a missing one, so a line is "
                                    "drawn when it is right at least 70% of the time.")
 show_truth = st.sidebar.checkbox("Show accuracy vs. answer key", value=True,
-                                 help="Off: hides precision numbers and green colouring.")
+                                 help="Off: hides the precision numbers.")
 domain_slot = st.sidebar.container()      # the company page puts its "Domain" filter here
 st.sidebar.divider()
 if st.sidebar.button("Docs: how it works", icon=":material/account_tree:", width="stretch"):
@@ -468,7 +506,6 @@ if not cid:
     s = apply_threshold(pd.concat([loaded[k][1] for k in chosen]), threshold)
     coverage, precision = score(s)
     shown = companies[companies.dataset.isin(chosen)].reset_index(drop=True)
-    ss.table_ids = shown.company_id.tolist()      # row number -> company, for open_clicked
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("Companies", f"{len(shown):,}")
     c2.metric("People", f"{sum(len(loaded[k][0]) for k in chosen):,}")
@@ -489,7 +526,10 @@ if not cid:
         "lines": drawn.groupby(every.company_id).sum(),
         "coverage": 100 * g.given.mean(),
         "precision": 100 * g.right.sum() / g.given.sum().where(g.given.sum() > 0),
-    })).reset_index(drop=True)
+    })).reset_index()
+    # Largest companies first (ties stay A-Z); header clicks can still re-sort
+    table = table.sort_values("employees", ascending=False, kind="stable").reset_index(drop=True)
+    ss.table_ids = table.company_id.tolist()      # row number -> company, for open_clicked
     table["dataset"] = table.dataset.map(lambda k: DATASETS[k][0])
     if "real" in chosen:
         st.caption(f"{ASX}: coverage and precision only count people whose manager "
@@ -520,7 +560,7 @@ df, scored, emp, truth_small = loaded[dataset_of[cid]]    # this company's datas
 # What-if changes (this visitor only): re-run inference in memory for affected companies.
 # Only changes made in this company's dataset (people can't move between datasets).
 events = {k: [e for e in ss.whatif[k] if dataset_of.get(e["company_id"]) == dataset_of[cid]]
-          for k in ("leavers", "added")}
+          for k in ("leavers", "added", "changes")}
 if cid in whatif.touched(emp, events):
     wp = whatif.apply(emp, events, current_judge())
     base = wp[wp.company_id == cid].merge(truth_small, on="employee_id", how="left")
@@ -538,23 +578,34 @@ interim_ids = set(co.employee_id[co.interim == True]) if "interim" in co else se
 co.loc[co.employee_id.isin(interim_ids), "checkable"] = False     # interim: never scored
 vacant_ids = set(co.employee_id[co.vacant.astype(str) == "True"]) if "vacant" in co else set()
 not_here = vacant_ids | left_ids                 # cards without a person working here now
+# Title changes here: the people changed and their old teams are never scored
+my_changes = [c for c in events["changes"] if c["company_id"] == cid]
+changed_people = {c["employee_id"] for c in my_changes}
+changed_ids = changed_people | {e for c in my_changes for e in c["reports"]}
+co.loc[co.employee_id.isin(changed_ids) | co.true_manager_id.isin(changed_people),
+       "checkable"] = False
 functions = ["All"] + sorted(co.function.dropna().unique().tolist())
 func = domain_slot.selectbox("Domain", functions,
                              help="Show one function (Engineering, Sales …) under the CEO")
 
 # ---------------------------------------------------------------- buttons
-b1, b2, b3, _ = st.columns([1.4, 1, 1.2, 2.4])
+b1, b2, b3, b4, _ = st.columns([1.4, 1, 1.2, 1.7, 0.7])
 b1.button("Back to all companies", icon=":material/arrow_back:", on_click=back_to_all)
 b2.button("Add people", icon=":material/add:", on_click=set_flag, args=("adding", True))
 b3.button("Remove people", icon=":material/remove:", on_click=set_flag,
           args=("removing", True))
+b4.button("Promote / change title", icon=":material/swap_vert:", on_click=set_flag,
+          args=("changing", True))
 if ss.get("removing"):
     remove_people_dialog(cid, co, not_here)
+if ss.get("changing"):
+    change_title_dialog(cid, co, not_here)
 
 # ---------------------------------------------------------------- headline numbers
 info = co.iloc[0]
-sc = scored[(scored.company_id == cid) & ~scored.employee_id.isin(not_here | interim_ids)
-            & ~scored.true_manager_id.isin(left_ids)][
+sc = scored[(scored.company_id == cid)
+            & ~scored.employee_id.isin(not_here | interim_ids | changed_ids)
+            & ~scored.true_manager_id.isin(left_ids | changed_people)][
     ["employee_id", "true_manager_id"]].merge(
     co[["employee_id", "pred_manager_id", "confidence"]], on="employee_id", how="left")
 coverage, precision = score(apply_threshold(sc, threshold)) if len(sc) else (None, None)
@@ -585,6 +636,48 @@ for lv in events["leavers"]:
                        f"{len(team) - placed - interim} waiting for a new manager"
                      + (" (placed by Gemini)." if (team.get("judge") == "Gemini").any()
                         else "."))
+
+def change_lines(i, ch):
+    """What step i (a title change) did: title, level, department, manager."""
+    nxt = next((c for c in my_changes[i + 1:] if c["employee_id"] == ch["employee_id"]), None)
+    if nxt:                       # changed again later: this step ended where that one began
+        mgr, conf, why = nxt["old_manager_name"], nxt["old_confidence"], None
+    else:                         # the chart as shown now
+        r = co[co.employee_id == ch["employee_id"]].iloc[0]
+        mgr = (co.full_name[co.employee_id == r.manager_id].iloc[0]
+               if pd.notna(r.manager_id) else None)
+        conf, why = r.confidence, r.reason if isinstance(r.reason, str) and r.reason else None
+    show = lambda x: "?" if x is None else x                                # noqa: E731
+    same = ch["old_function"] == ch["new_function"]
+    return [f"title: {show(ch['old_title'])} → {ch['new_title']}",
+            f"level: {show(ch['old_level'])} → {show(ch['new_level'])} ({ch['kind']})",
+            f"department: {show(ch['old_function'])} → {show(ch['new_function'])} ("
+            + ("same department" if same else "moved to a different department") + ")",
+            f"manager: {ch['old_manager_name'] or 'not placed'} → "
+            + (f"{mgr} (confidence {conf:.2f})" if mgr
+               else "not placed" + (f" ({why})" if why else ""))]
+
+
+latest = {}                       # person -> their last change, for the card and the CSV
+for i, ch in enumerate(my_changes):
+    lines = change_lines(i, ch)
+    latest[ch["employee_id"]] = (ch, lines)
+    team = co[co.employee_id.isin(ch["reports"]) & ~co.employee_id.isin(left_ids)]
+    if team.empty:
+        about = "no direct reports"
+    elif ch["vacant"]:
+        about = (f"{len(team)} direct report(s) stay under the vacant "
+                 f"\"{ch['old_title']}\" position")
+    else:
+        drawn = team.manager_id.notna()
+        stayed = int((team.manager_id == ch["employee_id"]).sum())
+        interim = int((drawn & team.employee_id.isin(interim_ids)).sum())
+        about = (f"{len(team)} direct report(s): {stayed} stayed with them, "
+                 f"{int(drawn.sum()) - stayed - interim} re-placed, {interim} interim under "
+                 f"the CEO, {len(team) - int(drawn.sum())} waiting for a new manager")
+    notes.append(f"🔀 **{ch['full_name']}**: {ch['kind']}  \n" + "  \n".join(lines + [about]))
+co["change_note"] = co.employee_id.map(lambda e: "\n".join(latest[e][1]) if e in latest
+                                       else None)
 tagged = co[co.tag.notna() & ~co.employee_id.isin(not_here)] if "tag" in co else co.iloc[0:0]
 for r in tagged.itertuples():
     where = (f"reports to {name_of[r.manager_id]}, confidence {r.confidence:.2f}"
@@ -615,7 +708,11 @@ def chart_csv(co):
         if r.employee_id in left_ids:
             return "left" + (f" → {r.left_to}" if isinstance(r.left_to, str) and r.left_to
                              else "")
-        parts = [f"manager left, was under {r.was_under}"] \
+        if r.employee_id in vacant_ids:
+            note = getattr(r, "vacancy_note", None)
+            return "vacant position" + (f" ({note})" if isinstance(note, str) else "")
+        why = getattr(r, "was_under_why", None)
+        parts = [f"{why if isinstance(why, str) else 'manager left'}, was under {r.was_under}"] \
             if isinstance(getattr(r, "was_under", None), str) else []
         if r.employee_id in interim_ids and pd.notna(r.manager_id):
             parts.insert(0, "interim, reports to CEO")
@@ -630,6 +727,11 @@ def chart_csv(co):
         "confidence": co.confidence.where(co.manager_id.notna() & here).round(3),
         "reason_no_manager": co.reason.where(co.manager_id.isna()),
         "status": [status(r) for r in co.itertuples()],
+        # The person's last title change on this chart (blank if none)
+        **{col: co.employee_id.map(lambda e, k=key: latest[e][0][k] if e in latest else None)
+           for col, key in [("change_type", "kind"), ("old_title", "old_title"),
+                            ("old_level", "old_level"), ("old_function", "old_function"),
+                            ("old_manager", "old_manager_name")]},
     }).to_csv(index=False).encode("utf-8-sig")   # with BOM: Excel then reads "→" correctly
 
 
