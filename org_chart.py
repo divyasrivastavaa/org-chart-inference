@@ -141,13 +141,19 @@ TEMPLATE = r"""
   .chev.up { transform:rotate(-135deg) translate(-1px,-1px); }
   svg.links { position:absolute; left:0; top:0; pointer-events:none; z-index:0; overflow:visible; }
   .empty { color:var(--muted); font-size:13px; padding:6px 4px; }
+  #np summary { margin:6px 0 10px; font-size:15px; font-weight:700; cursor:pointer; }
+  #np-about { margin:0 0 6px; }
+  /* Opened "Not placed": its own scroll box, as tall as the chart frame allows */
+  #np .tree { position:relative; max-height:calc(100vh - 90px); overflow:auto;
+              border:1px solid #e5e7eb; border-radius:10px; padding:0 4px; }
   hr { border:0; border-top:1px solid #e5e7eb; margin:6px 0; }
 </style>
 <div class="section" id="main"><h4>Org chart <span class="hint">· click a number to see that
   person's team</span></h4><div class="tree"></div></div>
 <hr>
-<div class="section" id="np"><h4>Not placed <span class="hint" id="np-hint"></span></h4>
-  <div class="tree"></div></div>
+<details class="section" id="np"><summary>Not placed <span id="np-count"></span>
+  <span class="hint" id="np-hint">· click to show</span></summary>
+  <div class="hint" id="np-about"></div><div class="tree"></div></details>
 <script>
 const D = __DATA__;
 const N = D.nodes;
@@ -163,11 +169,22 @@ if (D.hl) {
   const top = chain.length ? chain[0] : D.hl;
   const sec = D.roots.includes(top) ? "main" : "np";
   if (chain.length || sec === "np") state[sec] = chain;
+  if (sec === "np") document.getElementById("np").open = true;   // so the picked card shows
 }
 const fmt = n => n.toLocaleString("en-US");
 
-document.getElementById("np-hint").textContent =
-  "· " + fmt(D.unplaced.length) + " people without a manager (not confident enough to draw a line)";
+// "Not placed" is closed until the visitor clicks its header
+const npBox = document.getElementById("np");
+document.getElementById("np-count").textContent = "(" + fmt(D.unplaced.length) + ")";
+document.getElementById("np-about").textContent =
+  fmt(D.unplaced.length) + " people without a manager (not confident enough to draw a line)";
+npBox.addEventListener("toggle", () => {
+  document.getElementById("np-hint").textContent = npBox.open ? "· click to hide" : "· click to show";
+  if (npBox.open) {
+    drawLinks("np");                            // lines can only be measured once it is visible
+    if (!npBox.querySelector(".card.hl")) npBox.scrollIntoView({ block: "start" });  // show it
+  }
+});
 
 function initials(name) {
   const p = name.replace(/[^A-Za-z' -]/g, "").trim().split(/\s+/);
@@ -247,7 +264,8 @@ function render(sec) {
 }
 
 function drawLinks(sec) {
-  const box = document.getElementById(sec);
+  // "Not placed" scrolls inside its own box: draw its lines in that box, so they scroll along
+  const box = sec === "np" ? document.querySelector("#np .tree") : document.getElementById(sec);
   box.querySelectorAll("svg.links").forEach(s => s.remove());
   const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
   svg.setAttribute("class", "links");
@@ -257,7 +275,8 @@ function drawLinks(sec) {
     const parent = box.querySelector('.card.open[data-id="' + CSS.escape(g.dataset.parent) + '"]');
     if (!parent) return;
     const p = parent.getBoundingClientRect(), q = g.getBoundingClientRect();
-    const x = p.left + p.width / 2 - b.left, y1 = p.bottom - b.top, y2 = q.top - b.top;
+    const x = p.left + p.width / 2 - b.left + box.scrollLeft;   // scroll is 0 for "main"
+    const y1 = p.bottom - b.top + box.scrollTop, y2 = q.top - b.top + box.scrollTop;
     const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
     path.setAttribute("d", "M" + x + " " + y1 + " V" + y2);
     path.style.stroke = "var(--line)"; path.style.strokeWidth = "1.6"; path.style.fill = "none";
