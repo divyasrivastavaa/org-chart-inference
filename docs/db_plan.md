@@ -40,8 +40,9 @@ when that check passes.
 
 | Secret | What it is for |
 |---|---|
-| `SUPABASE_DB_URL` | read/write connection (loading, refresh runs, app changes) |
-| `SUPABASE_READONLY_URL` | the read-only SQL tab |
+| `DATABASE_URL` | Supabase session pooler address, with `[YOUR-PASSWORD]` as a placeholder |
+| `DATABASE_PASSWORD` | the database password; `db/connect.py` puts it into `DATABASE_URL`, percent-encoded |
+| `DATABASE_READONLY_URL` | the read-only SQL tab (Step 10) |
 | `PDL_API_KEY` | People Data Labs |
 | `LOGFIRE_TOKEN` | Logfire logging |
 | `APP_EDIT_PASSWORD` | unlocks adding or changing data in the hosted app |
@@ -94,28 +95,39 @@ Step 2, since nothing is connected yet.
 ## Step 2 — Connect and load the existing data (small first)
 
 1. Run `db/schema.sql` once in Supabase (SQL Editor → paste → Run).
-2. Put the connection string in `SUPABASE_DB_URL`. Use Supabase's **Session pooler**
-   address, because Streamlit Cloud can't reach the direct address (it is IPv6 only).
-3. Write `db/load_existing.py`. It reads the CSVs that the current pipeline builds and fills
-   the tables:
+2. **Connect.** We connect with two secrets:
+   - `DATABASE_URL`: Supabase's **Session pooler** address, because Streamlit Cloud can't
+     reach the direct address (it is IPv6 only). It has `[YOUR-PASSWORD]` as a
+     placeholder.
+   - `DATABASE_PASSWORD`: the password itself.
+
+   `db/connect.py` (`get_connection()`) puts the password into the address,
+   percent-encoded, and connects with psycopg. `scripts/check_db.py` prints only the
+   Postgres version, the tables and their row counts. **Done:** PostgreSQL 17, 6 empty
+   tables.
+3. **Load a small sample.** `scripts/load_db.py` reads the CSVs the current pipeline builds
+   and fills the tables:
 
 | From | To |
 |---|---|
-| `employees.csv` company columns | `companies` (`source` = benchmark / asx_nzx / uk_organogram) |
+| `employees.csv` company columns | `companies` (`source` = benchmark / asx_nzx / uk_organogram), `needs_refresh = true` |
 | `employees.csv` people | `people` + one `employments` row each (`change_type = 'initial'`, `is_current = true`) |
-| `predictions.csv` | one `runs` row (`trigger = 'initial_load'`) + `reporting_lines` |
 | `truth.csv` | `answer_key` |
 
-   - Duplicate rows (`-DUP`) are dropped, the same way `infer.py` drops them.
-   - Benchmark people who are "missing from the data" are not loaded as people. They stay
-     only as `true_manager_id` in the answer key, so the inference can't see them.
-4. **Small first:** `--companies 5` loads 5 Benchmark companies, 2 ASX/NZX and 1 UK.
-   Check the counts, run the 5 example queries, then load everything (about 158k
-   Benchmark people). That fits easily in the free 500 MB.
+   - **Duplicate rows** (`-DUP`) are skipped.
+   - **Benchmark people "missing from the data"** are not loaded as people. They stay only
+     as `true_manager_id` in the answer key, so the inference can't see them.
+   - **ASX/NZX answer key:** only the 43 managers confirmed in writing are loaded.
+   - **UK and Benchmark answer key:** a blank manager means top of the organisation.
+   - **Safe to rerun:** every insert skips rows that already exist.
+   - **Sample:** all 20 ASX/NZX companies, 2 UK organisations (U01, U02) and 10 Benchmark
+     companies (C001–C010, seed 42). **Done:** 32 companies, 2,144 people, 2,144
+     employments, 1,969 answer-key rows.
+4. **Later, at the end (Step 11):** `--benchmark 500 --uk 12` loads everything (about 158k
+   Benchmark people). That fits in the free 500 MB.
 5. The held-out seed 7 dataset stays as files. It is only used for measuring.
 
-Check: row counts in the database = row counts in the CSVs. Example query 2 for `C001`
-shows the same managers as the app.
+Check: row counts in the database = row counts in the CSVs (without duplicates).
 
 ## Step 3 — Run the inference from the database
 
@@ -243,7 +255,7 @@ Rules:
   they are: an in-memory sandbox, per visitor, never saved. The Database page is the place
   where real changes are recorded.
 - **Where the app reads from.** The company list and org chart read from the database when
-  `SUPABASE_DB_URL` is set, and fall back to the CSVs when it isn't. Local runs and tests
+  `DATABASE_URL` is set, and fall back to the CSVs when it isn't. Local runs and tests
   still work without a database.
 
 Check: add a person in the app, refresh, and see them on the chart. Query 1 shows their
@@ -282,7 +294,7 @@ Read-only by design, with several layers:
 1. **A database role that can only read.** `app_readonly` has `SELECT` on these tables and
    a row level security policy that lets it read them. It is created once in Supabase, with
    its password set there (never in code), and its connection string goes in
-   `SUPABASE_READONLY_URL`.
+   `DATABASE_READONLY_URL`.
 2. **Read-only transactions.** The role has `default_transaction_read_only = on`, and the
    app also runs every query inside a read-only transaction.
 3. **Limits.** `statement_timeout = 5s`, and at most 1,000 rows are shown.
@@ -308,7 +320,7 @@ itself, not just by the app.
 | Step | What | Status |
 |---|---|---|
 | 1 | Schema + plan + db/README | done |
-| 2 | Connect + load existing data (small, then all) | next |
+| 2 | Connect + load existing data (small, then all) | connected; small sample loaded (full load in Step 11) |
 | 3 | Inference from the database, same numbers | |
 | 4 | Refresh only changed companies | |
 | 5 | PDL companies (small sample) | |
