@@ -48,7 +48,9 @@ create table companies (
     country           text,
     website           text,
     source            text not null
-                      check (source in ('benchmark', 'asx_nzx', 'uk_organogram', 'pdl', 'app')),
+                      check (source in ('benchmark', 'asx_nzx', 'uk_organogram', 'pdl',
+                                        'pdl_history',   -- a past employer in PDL job history
+                                        'app')),
     source_ref        text,                          -- id in the source (e.g. the PDL company id)
     needs_refresh     boolean not null default true, -- org chart must be re-inferred
     last_refreshed_at timestamptz,
@@ -85,6 +87,7 @@ create table employments (
     title                  text,                     -- as written in the source (messy is fine)
     department             text,
     location               text,
+    seniority              text,                     -- from the source, e.g. PDL 'vp,director'
     start_date             date,                     -- PDL often gives only year-month: day 1
     end_date               date,                     -- null while the job is current
     is_current             boolean not null default true,
@@ -92,7 +95,7 @@ create table employments (
                            check (change_type in (
                                'initial',            -- first load of existing data
                                'new_person',         -- person added to the database
-                               'joined_company',     -- moved here from another company
+                               'job_change',         -- moved here from another company
                                'title_change')),     -- new title, same company
                            -- Leaving is not a type: the old row is closed (end_date set).
     previous_employment_id bigint references employments (employment_id),  -- the row it replaced
@@ -107,11 +110,14 @@ create unique index employments_one_current_idx
 create index employments_company_current_idx on employments (company_id) where is_current;
 create index employments_person_idx on employments (person_id, start_date);
 
--- Any new or changed employment marks its company for an org chart refresh
+-- A new or changed CURRENT job (or a current job being closed) marks its company for an
+-- org chart refresh. Past jobs (job history) don't change today's org chart.
 create function mark_company_for_refresh() returns trigger
 language plpgsql as $$
 begin
-    update companies set needs_refresh = true where company_id = new.company_id;
+    if new.is_current or (tg_op = 'UPDATE' and old.is_current) then
+        update companies set needs_refresh = true where company_id = new.company_id;
+    end if;
     return new;
 end;
 $$;

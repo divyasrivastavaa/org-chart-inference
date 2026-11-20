@@ -11,6 +11,10 @@ __pycache__/
 Data - Take Home Task_ Org Chart Inference _ Notion.html
 Data - Take Home Task_ Org Chart Inference _ Notion_files/
 
+# PDL API responses (real people's data): cached locally only, never committed.
+# (Already covered by data/* above; listed so it stays ignored if that rule changes.)
+data/pdl/cache/
+
 # API keys (Gemini): local only. When deployed, use Streamlit Cloud's Secrets settings.
 .streamlit/secrets.toml
 

@@ -74,7 +74,7 @@ Key decisions:
   - **Title change:** close the old employment row (`end_date`, `is_current = false`) and
     add a new row with `change_type = 'title_change'`.
   - **Move to another company:** close the old row and add a row at the new company with
-    `change_type = 'joined_company'`.
+    `change_type = 'job_change'`.
   - `previous_employment_id` links each new row to the one it replaced.
 - **Reporting lines keep their history too.** A refresh writes a new row only for a person
   whose line changed, and marks the old row `is_current = false`. Each row belongs to a
@@ -225,7 +225,7 @@ Check: the field table is shown, and at most 2 credits were used.
 - **Re-fetch** a known person, only on request and always through the cache. Compare their
   latest job with their current `employments` row:
   - **Same company, different title:** close the old row and add a `title_change` row.
-  - **Different company:** close the old row and add a `joined_company` row at the new
+  - **Different company:** close the old row and add a `job_change` row at the new
     company (created if missing). Both companies get `needs_refresh = true`.
   - **Nothing changed:** nothing is written.
 - The same logic is used by the app (Step 8), so every change goes through one function:
@@ -242,7 +242,7 @@ A new **Database** page in the app has these forms:
 - **Add a person:** name, title, department, company, start date (`change_type =
   'new_person'`).
 - **Change title:** same company (`title_change`).
-- **Moves to another company:** `joined_company`, with the old job closed.
+- **Moves to another company:** `job_change`, with the old job closed.
 - **Leaves:** closes the current job.
 - **Refresh changed companies:** runs Step 4 and shows the run's numbers.
 
