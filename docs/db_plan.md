@@ -129,47 +129,49 @@ Step 2, since nothing is connected yet.
 
 Check: row counts in the database = row counts in the CSVs (without duplicates).
 
-## Step 3 — Run the inference from the database
+## Steps 3 and 4 — Inference from the database, refresh only changed companies
 
-- Write `db/store.py` with small functions:
-  - `company_frame(company_ids)` reads the current employments and returns a table with
-    the same columns as `employees.csv`.
-  - `save_run(...)` writes a run and its reporting lines.
-- `infer.predict()` is reused **unchanged**: same rules, same decision tree, same 0.7
-  threshold.
-- New command: `python -m db.run --all` runs the inference for every company from the
-  database.
+One command does both: `python refresh.py` (later also a button in the app).
 
-Check: precision and coverage computed from the database = the CSV numbers on all four
-datasets (Benchmark 95.2% / 62.7%, ASX/NZX 36 of 36, UK as in E6). Logged in
-`docs/experiments.md`.
-
-## Step 4 — Refresh only what changed
-
-`python -m db.run --refresh` (and a button in the app):
-
-1. Find the companies with `needs_refresh = true`.
-2. Re-infer each of those companies **as a whole**. A new person can change other people's
-   lines: a newly added VP becomes the manager of the Directors in that function. Other
-   companies are not touched.
-3. Compare each new line with the current one (manager, proposed manager, confidence,
-   reason).
-   - **Same:** nothing is written.
-   - **Different, or a new person:** mark the old row `is_current = false` and add a new
-     row.
-   - **Person left:** their old row is closed.
-4. Set `needs_refresh = false` and `last_refreshed_at = now()`. This happens in **one
-   transaction per company**, so a crash never leaves a half-updated chart.
-5. Fill in the `runs` row: counts, time taken, cost, status (`succeeded` / `failed` with the
-   error).
+1. **Open a run.** It writes a row in `runs`: trigger, start time, status `running`.
+2. **Pick companies.** It takes the companies with `needs_refresh = true` **that have
+   current employees**. Companies that only appear in someone's past job history are never
+   refreshed.
+3. **Infer.** It loads their current employments from the database and runs
+   `infer.predict()` **unchanged**: same rules, same decision tree, same 0.7 threshold.
+   - Each company is re-inferred **as a whole**, because a new person can change other
+     people's lines. For example, a newly added VP becomes the manager of the Directors in
+     that function.
+   - Other companies are not touched.
+   - **PDL department words are translated first** (`human_resources` → `Human Resources`,
+     words with no match → blank). Otherwise `infer.py` would read them as UK unit names.
+     The rules are unchanged; only the input is mapped.
+4. **Save, one transaction per company,** so a crash never leaves a half-updated chart:
+   - all the company's current `reporting_lines` get `is_current = false`;
+   - **all** its new lines are inserted with `is_current = true` and this `run_id`;
+   - the company gets `needs_refresh = false`, `last_refreshed_at` and `last_run_id`.
+   Writing all lines (not only the changed ones) keeps every run's full chart in the
+   history. The cost is small, because only flagged companies are refreshed.
+5. **Close the run:** end time, status (`succeeded`, or `failed` with the error), companies
+   and people processed, lines written, threshold and cost. Cost is $0 for the rules: no
+   Gemini tokens, no PDL credits.
+6. **Nothing to do:** if no company needs a refresh, the run is still recorded, with 0
+   companies, and nothing else happens.
 
 So "refresh only for new people, people who changed jobs and people newly added" means:
-only their companies are re-inferred, and only the lines that actually changed are written.
+only their companies are re-inferred.
 
-Check: a test on 3 small companies.
-- Change one title. Only that company is refreshed, and only the affected lines get new
-  rows.
-- Run the refresh again. Nothing is written (`lines_written = 0`).
+**Check, done (E8 in `docs/experiments.md`):**
+- **Run 1:** refreshed 33 companies (the 32 loaded + Atlassian), 2,194 people, 2,194 lines,
+  9 s, $0. The 233 past-only companies were not touched.
+- **Run 2:** 0 companies, nothing done.
+- **Same numbers as the CSVs.** `scripts/compare_db_csv.py` compares the database with the
+  CSVs for the same companies:
+  - ASX/NZX and UK: identical.
+  - Benchmark: 5 more lines, all right. The CSV run sometimes kept a duplicate (`-DUP`) row
+    instead of the original; the database has only originals.
+- **Atlassian (no answer key):** 0 of 50 lines drawn. Only senior people were fetched, so
+  most of their managers are not in the data, and 10 titles couldn't be parsed.
 
 ## Step 5 — PDL companies (small first)
 
@@ -188,13 +190,14 @@ download).
 
 ## Step 6 — PDL person API: one test call, then stop
 
-1. Write `db/pdl_person.py`. It makes **one call** with `size = 1` or `2`, for one of the
-   sample companies.
-   - Before calling, it checks the cache (`data/pdl_cache/<hash of the request>.json`). If
+1. `scripts/pdl_test.py` makes **one Person Search call** with `size = 2`, for Atlassian.
+   - Before calling, it checks the cache (`data/pdl/cache/<hash of the request>.json`). If
      the response is already there, it is used and no call is made.
-   - The key comes from `st.secrets["PDL_API_KEY"]`.
-   - Credits used are added to `credits_used.json`, with a hard stop at `--max-credits`.
-2. Save the raw JSON. Print a small table of which fields came back, and which are empty
+   - The key comes from `PDL_API_KEY` in the secrets.
+   - Only the fields this project uses are saved (no emails, phone numbers, social links or
+     addresses).
+   - **Done:** 2 credits. Everything we need came back; seniority is sometimes missing.
+2. Save the JSON (only the needed fields). Print a small table of which fields came back, and which are empty
    or hidden on the free plan:
    - name: `full_name`
    - job title: `job_title`
@@ -211,9 +214,14 @@ download).
    - **Unknown employers:** a past employer that isn't in `companies` is added with only its
      name and PDL id.
    - **Year-month dates** become the 1st of that month.
+   - **Done** with `scripts/pdl_load.py`: one call, 50 senior Atlassian people (cxo / vp /
+     director), 50 credits. Loaded 50 people, Atlassian + 233 past employers
+     (`pdl_history`) and 486 jobs: 50 initial, 272 job changes, 164 title changes.
+     The credit header then said 0 left, so **no PDL call is made without an explicit OK**.
 
 Privacy: these are real people.
-- The raw JSON stays git-ignored in `data/`.
+- The cached JSON stays git-ignored in `data/pdl/cache/`, stripped to the needed fields
+  (`scripts/pdl_strip_cache.py` stripped the first two files).
 - The hosted app shows only name, title, company and dates. Nothing else from the profile
   (no contact details, no social links).
 - Logs record IDs and counts, never names.
@@ -244,7 +252,8 @@ A new **Database** page in the app has these forms:
 - **Change title:** same company (`title_change`).
 - **Moves to another company:** `job_change`, with the old job closed.
 - **Leaves:** closes the current job.
-- **Refresh changed companies:** runs Step 4 and shows the run's numbers.
+- **Refresh changed companies:** runs `refresh.py` (Steps 3 and 4) and shows the run's
+  numbers.
 
 Rules:
 
@@ -321,10 +330,10 @@ itself, not just by the app.
 |---|---|---|
 | 1 | Schema + plan + db/README | done |
 | 2 | Connect + load existing data (small, then all) | connected; small sample loaded (full load in Step 11) |
-| 3 | Inference from the database, same numbers | |
-| 4 | Refresh only changed companies | |
-| 5 | PDL companies (small sample) | |
-| 6 | PDL person API: one test call, wait for OK | |
+| 3 | Inference from the database, same numbers | done (`refresh.py`, E8) |
+| 4 | Refresh only changed companies | done (`refresh.py`, E8) |
+| 5 | PDL companies (small sample) | not started (Atlassian + past employers came from Step 6) |
+| 6 | PDL person API: one test call, wait for OK | done: test (2 credits) + one run of 50 people (50 credits) |
 | 7 | Job-change tracking | |
 | 8 | Add / change data in the app | |
 | 9 | Logfire + cost per run | |

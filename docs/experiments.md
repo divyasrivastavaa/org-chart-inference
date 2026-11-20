@@ -159,3 +159,41 @@ generator and thrown away, so every other draw is unchanged. Checked:
 - `evaluate.py` output for seed 42 and seed 7 is identical line for line: 95.2% / 62.7%,
   4,727 wrong, Brier 0.0433; 95.4% / 63.7%, 4,411 wrong, Brier 0.0420.
 - Retrained confidence tree: `models/` unchanged. ASX/NZX and UK data don't use the generator.
+
+## E8. Phase 2: inference from the database (20 Nov 2026)
+Not a model change. The same `infer.predict()` (rules, decision tree, threshold 0.7) now
+also runs from the Postgres database: `refresh.py` re-infers only companies with
+`needs_refresh = true` and current employees, and saves the lines to `reporting_lines`
+with a `run_id`. Sample in the database: 20 ASX/NZX, UK U01-U02, Benchmark C001-C010
+(seed 42), plus 50 senior Atlassian people from PDL. Compared with `scripts/compare_db_csv.py`.
+
+| Same companies, threshold 0.7 | People scored | Drawn | Right | Wrong | Precision | Coverage |
+|---|---|---|---|---|---|---|
+| Benchmark C001-C010, database | 1,620 | 1,055 | 1,044 | 11 | 99.0% | 65.1% |
+| Benchmark C001-C010, CSV | 1,620 | 1,050 | 1,039 | 11 | 99.0% | 64.8% |
+| ASX/NZX (20), database = CSV | 43 | 36 | 36 | 0 | 100.0% | 83.7% |
+| UK U01-U02, database = CSV | 294 | 132 | 110 | 22 | 83.3% | 44.9% |
+
+- **ASX/NZX and UK:** identical.
+- **Benchmark:** +5 lines, all right, in C001, C002, C005 and C006.
+  - The cause: `infer.predict()` drops duplicate rows and keeps the first one in file
+    order. In the CSV that is sometimes the `-DUP` copy, so the original person counts as
+    "no line" when scored. The database holds only the originals.
+  - Wrong lines are unchanged (11).
+  - The CSV pipeline itself is unchanged, so the baseline numbers stay as they are.
+- **Atlassian (PDL, no answer key):** 0 of 50 lines drawn, because no candidate manager was
+  found for anyone. Reasons:
+  - 22: a teamless "Head of" may be the VP;
+  - 10: title could not be parsed;
+  - 9: no more-senior person in the same function;
+  - 7: 2 possible managers at level 3;
+  - 2: other.
+
+  Only senior people were fetched, so most of their managers are missing from the data;
+  abstaining is the intended behaviour. Before inference, PDL department words are mapped
+  to our department names (`human_resources` → `Human Resources`), so they are not treated
+  like UK unit names. This maps the input only; the rules are unchanged.
+- **Runs:** run 1 refreshed 33 companies, 2,194 people, 2,194 lines, 9 s, $0. Run 2
+  refreshed 0 companies.
+- **Held-out seed 7 and the full Benchmark:** not run from the database yet; they stay as
+  CSV, so their baseline numbers are unchanged.
