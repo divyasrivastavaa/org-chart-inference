@@ -1,122 +1,103 @@
 """
-app.py  -  Step 7
-Streamlit app. Front page: one searchable, sortable table of all companies from both
-datasets ("Benchmark": 500 generated, "ASX/NZX leadership": 20 real), with buttons to
-show one or both datasets, and an "Add people" button.
+app.py  -  Step 7 + Phase 2: database
+Streamlit app. Everything it shows is read from the Postgres database (db/read.py). The
+CSV files are only used once, to import the source data (scripts/load_db.py).
+Front page: one searchable, sortable table of all companies from all datasets
+("Benchmark": generated, "ASX/NZX leadership" and "UK government organograms": real,
+"PDL people": real people from People Data Labs), with dataset buttons and "Add people".
 Click a company name (or use the sidebar) to open that company's inferred org chart.
-Company page: a "What if" section (someone leaves, add people) that changes the chart for
-this visitor only, in memory. Nothing is ever saved to files.
+Company page: a "What if" section (someone leaves, add people, promote) that changes the
+chart for this visitor only, in memory. Nothing is saved.
+Sidebar "Database": job history, runs & cost, read-only SQL.
 Run locally with:  streamlit run app.py
 """
 import copy
+import hmac
 import json
-import runpy
-import threading
+import re
 from pathlib import Path
 
 import pandas as pd
+import psycopg
 import streamlit as st
 
 import judge_gemini
 import org_chart
 import whatif
+from db import read as dbread
+from db.connect import get_secret
 
 st.set_page_config(page_title="Org Chart Inference", layout="wide")
 ROOT = Path(__file__).resolve().parent
-# Internal key -> (name shown in the app, folder). Names say where the data comes from.
-DATASETS = {"synthetic": ("Benchmark", "data"),
-            "real": ("ASX/NZX leadership", "data/real"),
-            "uk": ("UK government organograms", "data/uk")}
-GEN, ASX, UKN = (DATASETS[k][0] for k in ("synthetic", "real", "uk"))
+# Internal key -> name shown in the app. Names say where the data comes from.
+DATASETS = {"synthetic": "Benchmark", "real": "ASX/NZX leadership",
+            "uk": "UK government organograms", "pdl": "PDL people (real)"}
+GEN, ASX, UKN, PDL = (DATASETS[k] for k in ("synthetic", "real", "uk", "pdl"))
 OGL = ("Contains public sector information licensed under the "
        "[Open Government Licence v3.0]"
        "(https://www.nationalarchives.gov.uk/doc/open-government-licence/version/3/).")
 MODEL_THRESHOLD = json.loads((ROOT / "models" / "confidence_tree.json").read_text())[
     "decision_threshold"]
+UK_TUNE = {"U02", "U03", "U07", "U09", "U10", "U11"}   # UK fixes were designed on these
+TTL = 60                                                # seconds a database read is cached
+NOT_CONNECTED = ("**Database not connected.** The app reads everything from the database. "
+                 "Check DATABASE_URL and DATABASE_PASSWORD in the Streamlit secrets, or "
+                 "resume the Supabase project if it was paused, then reload this page.")
 
 
-@st.cache_resource
-def build_lock():
-    return threading.Lock()        # one lock shared by every visitor's session
+def db(fn, *args):
+    """Call a database read; if the database can't be reached, say so and stop."""
+    try:
+        return fn(*args)
+    except (psycopg.Error, RuntimeError):
+        st.error(NOT_CONNECTED)
+        st.stop()
 
 
-def is_stale(folder):
-    # Missing files, or files made by an older version of the code
-    pred, truth = Path(folder, "predictions.csv"), Path(folder, "truth.csv")
-    if not pred.exists() or not truth.exists():
-        return True
-    needed = {"data": "scenario", "data/uk": "true_level"}.get(folder, "evidence_type")
-    if folder != "data":            # data/real/sources.csv: one row per source (new format)
-        sources = Path(DATASETS["real"][1], "sources.csv")
-        src = pd.read_csv(sources) if sources.exists() else pd.DataFrame()
-        if "licence" not in src:
-            return True
-        mine = (src.what_it_shows.str.startswith("Confirms ") if folder == "data/real"
-                else src.dataset == UKN)          # answer-key rows / UK rows present?
-        if not mine.any():
-            return True
-    first = pd.read_csv(pred, nrows=1)
-    if folder == "data":            # Benchmark built before the realistic company names
-        import generate_data
-        if not generate_data.is_v2_name(first.company_name[0], first.industry[0]):
-            return True
-    return (needed not in pd.read_csv(truth, nrows=1).columns
-            or "rule_confidence" not in first.columns
-            or first.get("threshold", pd.Series([None])).iloc[0] != MODEL_THRESHOLD)
+def show_pdl_names():
+    """True once this visitor entered the right DB_VIEW_PIN."""
+    return bool(st.session_state.get("pdl_ok"))
 
 
-def build(folder):
-    """Build a dataset from code in this repo (no internet needed)."""
-    import infer
-    if folder == "data":
-        import generate_data
-        generate_data.main()
-    elif folder == "data/uk":      # from the raw files committed in data/raw/uk/ (offline)
-        runpy.run_path(str(ROOT / "scripts" / "build_uk.py"), run_name="__main__")
-    else:                          # the real leadership lists are typed into build_real.py
-        runpy.run_path(str(ROOT / "scripts" / "build_real.py"), run_name="__main__")
-        runpy.run_path(str(ROOT / "scripts" / "build_real_truth.py"), run_name="__main__")
-    infer.main(folder)
+@st.cache_data(ttl=TTL, show_spinner=False)
+def db_companies():
+    return dbread.companies()
 
 
-@st.cache_data
-def load(folder):
-    # On a fresh server (e.g. Streamlit Cloud) the CSVs don't exist yet: build them once.
-    # The lock stops two visitors from rebuilding at the same time; the second one waits,
-    # then finds fresh files and skips the rebuild.
-    with build_lock():
-        if is_stale(folder):
-            build(folder)
-    emp = pd.read_csv(Path(folder, "employees.csv"), low_memory=False)   # for what-if
-    pred = pd.read_csv(Path(folder, "predictions.csv"), low_memory=False)
-    truth = pd.read_csv(Path(folder, "truth.csv"), low_memory=False)
-    # Scoring frame, built exactly like evaluate.py so the numbers match the README:
-    # one row per person who has a known manager, predictions joined on.
-    keep = truth.true_manager_id.notna()
-    if "in_dataset" in truth:                 # synthetic: people we never saw can't be scored
-        keep &= truth.in_dataset.astype(bool)
-    if "vacant" in truth:                     # leavers.csv: empty positions aren't scored
-        keep &= truth.vacant.astype(str) != "True"
-    if "source" in truth:                     # real: people added by hand are never scored
-        keep &= truth.source != "manually added"
-    scored = truth[keep][
-        ["company_id", "employee_id", "true_manager_id"]].merge(
-        pred[["employee_id", "pred_manager_id", "confidence"]], on="employee_id", how="left")
-    # Can a drawn line be coloured right/wrong? Synthetic: everyone. Real: only people
-    # with a manager confirmed by a written source.
-    truth["checkable"] = keep if folder != "data" else True
-    truth = truth[["employee_id", "true_manager_id", "checkable"]]
-    return pred.merge(truth, on="employee_id", how="left"), scored, emp, truth
+@st.cache_data(ttl=TTL, show_spinner=False)
+def db_stats(threshold):
+    return dbread.company_stats(threshold)
 
 
+@st.cache_data(ttl=TTL, show_spinner=False)
+def db_counts():
+    return dbread.counts()
+
+
+@st.cache_data(ttl=TTL, show_spinner=False)
+def db_accuracy(threshold, company_ids):
+    return dbread.accuracy(threshold, list(company_ids))
+
+
+@st.cache_data(ttl=TTL, show_spinner=False)
+def db_company(company_id, show_pdl):
+    return dbread.company(company_id, show_pdl)
+
+
+@st.cache_data(ttl=TTL, show_spinner=False)
+def db_employees(company_ids, show_pdl):
+    return dbread.employees(company_ids, show_pdl)
+
+
+@st.cache_data(ttl=TTL, show_spinner=False)
 def load_sources():
-    """data/real/sources.csv: one row per source, written by scripts/build_real.py,
-    build_real_truth.py and build_uk.py. Read fresh every time (47 rows): a cached copy
-    outlived rebuilds of the file and hid the UK rows."""
-    path = Path(DATASETS["real"][1], "sources.csv")
-    return pd.read_csv(path) if path.exists() else pd.DataFrame(
-        columns=["dataset", "company_id", "company_name", "url", "what_it_shows",
-                 "date_checked", "licence"])
+    """Where each real company / organisation comes from (table sources)."""
+    return dbread.sources()
+
+
+@st.cache_data(ttl=TTL, show_spinner=False)
+def db_runs():
+    return dbread.runs()
 
 
 @st.cache_resource
@@ -188,16 +169,20 @@ ss.whatif.setdefault("new_orgs", [])
 ss.whatif.setdefault("changes", [])
 ss.setdefault("history", [])       # earlier versions of ss.whatif, for "Undo last change"
 ss.setdefault("datasets", list(DATASETS))
+ss.setdefault("pdl_ok", False)
 ss.datasets = ss.datasets          # keep the dataset buttons' choice while a company is open
 
-# ---------------------------------------------------------------- both datasets
-# Company IDs never clash (synthetic C001..., real R01...), so one table holds both.
-loaded = {k: load(folder) for k, (_, folder) in DATASETS.items()}
-# Fixed order: the table's clicked row number is looked up in this list
-companies = (pd.concat([d[0][["company_id", "company_name", "industry"]]
-                        .drop_duplicates("company_id").assign(dataset=k)
-                        for k, d in loaded.items()])
+# ---------------------------------------------------------------- all datasets
+# Company IDs never clash (C001, R01, U01, P-...), so one table holds all of them.
+try:
+    companies = db_companies()
+except (psycopg.Error, RuntimeError):            # no secrets, wrong password, paused project
+    st.title("Org Chart Inference")
+    st.error(NOT_CONNECTED)
+    st.stop()
+companies = (companies[["company_id", "company_name", "industry", "dataset", "employees"]]
              .sort_values("company_name").reset_index(drop=True))
+COUNTS = db(db_counts)
 company_label = dict(zip(companies.company_id,
                          companies.company_name + " (" + companies.company_id + ")"))
 dataset_of = dict(zip(companies.company_id, companies.dataset))
@@ -242,14 +227,48 @@ FLOW_ANIMATION = """<style>
 </style>"""
 
 
+def ids_of(dataset, keep=lambda cid: True):
+    return tuple(sorted(c for c, d in zip(companies.company_id, companies.dataset)
+                        if d == dataset and keep(c)))
+
+
+def flow_svg():
+    """docs/flow.svg with its numbers replaced by live numbers from the database (the
+    README keeps the still picture). The held-out seed 7 isn't in the database: that line
+    stays as measured from files (docs/experiments.md)."""
+    svg = (ROOT / "docs" / "flow.svg").read_text(encoding="utf-8")
+    t = MODEL_THRESHOLD
+    gen = db(db_accuracy, t, ids_of("synthetic"))
+    ukt = db(db_accuracy, t, ids_of("uk", lambda c: c not in UK_TUNE))
+    asx = db(db_accuracy, t, ids_of("real"))
+    new = {
+        r">\d[\d,]* companies, messy titles,<":
+            f">{COUNTS['synthetic']['companies']:,} companies, messy titles,<",
+        r">\d+ organisations, [\d,]+ posts \(data\.gov\.uk\)<":
+            f">{COUNTS['uk']['companies']} organisations, {COUNTS['uk']['people']:,} posts "
+            "(data.gov.uk)<",
+        r">Benchmark seed 42: [^<]*<":
+            f">Benchmark seed 42: {pct(gen['precision'])} prec., {pct(gen['coverage'])} cov.<",
+        r">UK test half: [^<]*<":
+            f">UK test half: {pct(ukt['precision'])}, {pct(ukt['coverage'])}<",
+        r">ASX/NZX: [^<]*<":
+            f">ASX/NZX: {asx['right']} of {asx['given']} right, "
+            f"{pct(asx['coverage'], 0)} coverage<",
+    }
+    for pattern, text in new.items():
+        svg = re.sub(pattern, text, svg)
+    return svg
+
+
 @st.dialog("How it works", width="large")
 def docs_dialog():
-    # The same picture as in the README (docs/flow.svg), so the two never drift apart
-    svg = (ROOT / "docs" / "flow.svg").read_text(encoding="utf-8")
-    st.image(svg.replace("</defs>", FLOW_ANIMATION + "\n  </defs>"), width="stretch")
-    st.caption("Numbers are from the latest evaluation at threshold 0.7 "
-               "(see docs/experiments.md, E5 and E6).")
-    src = load_sources()
+    # The README's picture (docs/flow.svg), with the numbers taken from the database
+    st.image(flow_svg().replace("</defs>", FLOW_ANIMATION + "\n  </defs>"), width="stretch")
+    st.caption(f"Numbers come from the database: the current reporting lines (last "
+               f"refresh) at threshold {MODEL_THRESHOLD}, scored against the answer key. "
+               "The held-out seed 7 line is measured from files (docs/experiments.md, E5): "
+               "that dataset is not in the database.")
+    src = db(load_sources)
     key = src.what_it_shows.str.startswith("Confirms ")       # answer-key sources
     pages = src[(src.dataset == ASX) & ~key]
     uk = src[src.dataset == UKN]
@@ -259,18 +278,93 @@ def docs_dialog():
         "name and title is made up, and the generator writes the answer key itself.\n"
         f"- **{UKN}:** the senior-staff organogram CSV of {len(uk)} organisations from "
         f"data.gov.uk (downloaded {when(uk.date_checked)}; "
-        "raw files in `data/raw/uk/`, links in `data/real/sources.csv`). The published "
+        "raw files in `data/raw/uk/`, links in the database table `sources`). The published "
         "\"reports to\" column is the answer key. " + OGL + "\n"
         f"- **{ASX}:** each company's own leadership page ({len(pages)} pages, checked "
         f"{when(pages.date_checked)}). Its small answer key "
-        f"(43 confirmed lines) comes from {key.sum()} written company sources: "
-        "announcements about the person, and annual reports or governance statements. "
-        "All of them are listed in `data/real/sources.csv` and under the chart on each "
-        "company's page; the exact quotes are in `scripts/build_real_truth.py`.")
+        f"({COUNTS['confirmed_lines']} confirmed lines) comes from {key.sum()} written "
+        "company sources: announcements about the person, and annual reports or governance "
+        "statements. All of them are in the database table `sources` and under the chart on "
+        "each company's page; the exact quotes are in `scripts/build_real_truth.py`.\n"
+        f"- **{PDL}:** {COUNTS.get('pdl', {}).get('people', 0)} senior people at one company, "
+        "with their job history, from the People Data Labs person API (cached; no answer "
+        "key). Their names are shown only with the PIN.")
 
 
 def set_flag(name, value):
     ss[name] = value
+
+
+def database_page():
+    """Sidebar → Database: job history, runs & cost, and a read-only SQL box."""
+    st.button("Back", icon=":material/arrow_back:", on_click=set_flag, args=("db_view", False))
+    st.subheader("Database")
+    show = show_pdl_names()
+    t_jobs, t_runs, t_sql = st.tabs(["Job history", "Runs & cost", "SQL"])
+
+    with t_jobs:
+        text = st.text_input("Find a person by name or id",
+                             placeholder="e.g. C001-E0002, or part of a name")
+        st.caption("Every job a person has had, oldest first. A change never overwrites "
+                   "anything: the old job is closed and a new one opened. "
+                   + ("" if show else "PDL people (real) can be found by their id only "
+                      "(e.g. P-…); their names need the PIN."))
+        if text.strip():
+            found = db(dbread.find_people, text, show)
+            if found.empty:
+                st.info("No one found.")
+            else:
+                label = dict(zip(found.employee_id, found.full_name.fillna("(no name)")
+                                 + " (" + found.employee_id + ")"))
+                pid = st.selectbox(f"Person ({len(found)} found, first 50)", list(label),
+                                   format_func=label.get)
+                hist = db(dbread.job_history, pid)
+                kinds = hist.change_type.value_counts()
+                st.caption(f"{len(hist)} job(s): " + ", ".join(
+                    f"{n} {k.replace('_', ' ')}" for k, n in kinds.items()))
+                st.dataframe(hist, hide_index=True, width="stretch")
+
+    with t_runs:
+        runs = db(db_runs)
+        cost = runs.cost_usd.astype(float)
+        r1, r2, r3, r4 = st.columns(4)
+        r1.metric("Runs", f"{len(runs):,}")
+        r2.metric("Total cost", f"${cost.sum():,.4f}",
+                  help="Gemini tokens × list price + PDL credits × price (db/costs.py). "
+                       "The rules cost nothing.")
+        r3.metric("PDL credits used", f"{int(runs.pdl_credits_used.sum()):,}")
+        r4.metric("Gemini tokens",
+                  f"{int(runs.gemini_input_tokens.sum() + runs.gemini_output_tokens.sum()):,}")
+        st.caption("Newest first. A refresh re-infers only companies that changed; "
+                   "'pdl_import' rows are People Data Labs API calls.")
+        st.dataframe(runs, hide_index=True, width="stretch")
+
+    with t_sql:
+        pick = st.selectbox("Example queries", ["(write your own)"] + list(dbread.EXAMPLES))
+        sql = st.text_area("SQL: one SELECT or WITH statement",
+                           value=dbread.EXAMPLES.get(pick, "select * from companies"),
+                           height=220, key=f"sql_{pick}")
+        st.caption("Read only: runs as a role that can only read this project's tables, "
+                   "inside a READ ONLY transaction, stopped after 5 seconds, at most 500 rows "
+                   "(LIMIT 500 is added if the query has no LIMIT). "
+                   + ("" if show else "PDL people's rows are hidden without the PIN."))
+        if st.button("Run query", type="primary", icon=":material/play_arrow:"):
+            try:
+                result = dbread.run_readonly(sql, show)
+            except ValueError as e:                   # refused before it reached the database
+                st.warning(str(e))
+            except psycopg.errors.QueryCanceled:
+                st.warning("Stopped: the query took longer than 5 seconds.")
+            except psycopg.errors.InsufficientPrivilege:
+                st.warning("Not allowed: only this project's tables can be read here.")
+            except psycopg.Error as e:
+                st.error("The database refused the query: "
+                         + (str(e).strip().splitlines() or ["error"])[0])
+            except RuntimeError:
+                st.error(NOT_CONNECTED)
+            else:
+                st.caption(f"{len(result):,} row(s)")
+                st.dataframe(result, hide_index=True, width="stretch")
 
 
 def remember():
@@ -332,8 +426,8 @@ def add_people_dialog():
         taken = set()
     else:
         to_id, ds = to, dataset_of[to]
-        emp_to = loaded[ds][2]
-        taken = set(emp_to.full_name[emp_to.company_id == to])
+        taken = (set() if to in NEW_ORGS
+                 else db(dbread.names_in, to, show_pdl_names()))
     taken |= {a["full_name"] for a in ss.whatif["added"] if a["company_id"] == to_id}
     names = [n for n, _ in people if n]
     if to == NEW_ORG and not org_name.strip():
@@ -439,6 +533,36 @@ domain_slot = st.sidebar.container()      # the company page puts its "Domain" f
 st.sidebar.divider()
 if st.sidebar.button("Docs: how it works", icon=":material/account_tree:", width="stretch"):
     docs_dialog()
+
+# ---------------------------------------------------------------- sidebar: Database
+st.sidebar.divider()
+st.sidebar.markdown("**Database**")
+st.sidebar.button("Job history · Runs & cost · SQL", icon=":material/database:",
+                  width="stretch", on_click=set_flag, args=("db_view", True))
+PIN = get_secret("DB_VIEW_PIN")
+
+
+def check_pin():
+    entered = ss.get("pin_input", "")
+    ss.pdl_ok = bool(PIN) and hmac.compare_digest(str(entered), str(PIN))
+    ss.pin_wrong = bool(entered) and not ss.pdl_ok
+    ss.pin_input = ""                           # never keep the PIN in the page
+
+
+if ss.pdl_ok:
+    st.sidebar.caption("PDL people's names are shown.")
+    st.sidebar.button("Hide PDL names", on_click=set_flag, args=("pdl_ok", False),
+                      width="stretch")
+elif PIN:
+    st.sidebar.text_input("PIN to show PDL names", type="password", key="pin_input",
+                          on_change=check_pin,
+                          help="People from People Data Labs are real people. Without the "
+                               "PIN they are shown as 'PDL person #id'.")
+    if ss.get("pin_wrong"):
+        st.sidebar.caption(":red[Wrong PIN.]")
+else:
+    st.sidebar.caption("PDL people are shown as 'PDL person #id' (no DB_VIEW_PIN set).")
+
 if ss.get("adding"):
     add_people_dialog()
 cid = ss.company_select
@@ -448,17 +572,29 @@ else:
     st.query_params.pop("company", None)
 
 st.title("Org Chart Inference")
+if ss.get("db_view"):
+    database_page()
+    st.stop()
 REAL = bool(cid) and dataset_of[cid] == "real"
 UK = bool(cid) and dataset_of[cid] == "uk" and cid not in NEW_ORGS
+PDLCO = bool(cid) and dataset_of[cid] == "pdl"
+N = {k: COUNTS.get(k, {"companies": 0, "people": 0}) for k in DATASETS}
 if cid in NEW_ORGS:
     st.caption("**New organisation**, created by you in this browser session. Everyone here "
                "was added by hand, so there is no answer key. No line is drawn when "
                "confidence is below the threshold — a wrong line is worse than no line.")
 elif REAL:
-    st.caption(f"**Dataset: {ASX}.** The leadership teams of 20 ASX/NZX-listed companies, "
-               "from each company's own website (14 Nov 2026). Reporting lines are inferred "
-               "from job titles only. Accuracy is checked only for the 43 people whose "
-               "manager the company has confirmed in writing.")
+    st.caption(f"**Dataset: {ASX}.** The leadership teams of {N['real']['companies']} "
+               "ASX/NZX-listed companies, from each company's own website (14 Nov 2026). "
+               "Reporting lines are inferred from job titles only. Accuracy is checked only "
+               f"for the {COUNTS['confirmed_lines']} people whose manager the company has "
+               "confirmed in writing.")
+elif PDLCO:
+    st.caption(f"**Dataset: {PDL}.** Real people from the People Data Labs person API "
+               "(senior people only, with their job history; see Database → Job history). "
+               "There is no answer key, so accuracy can't be checked. Names are shown only "
+               "with the PIN. No line is drawn when confidence is below the threshold — a "
+               "wrong line is worse than no line.")
 elif UK:
     st.caption(f"**Dataset: {UKN}.** The senior-staff organogram this organisation "
                "publishes on data.gov.uk. The model sees only names (often withheld), job "
@@ -472,13 +608,18 @@ elif cid:
                "a wrong line is worse than no line.")
 else:
     st.caption("Reporting lines are inferred only from a list of names and job titles. "
-               f"{GEN}: 500 generated companies with a hidden answer key. {UKN}: 12 real "
-               "UK government organisations, whose published reporting lines are the answer "
-               f"key. {ASX}: 20 real leadership teams, where only the 43 managers confirmed "
-               "in writing serve as an answer key. No line is drawn when confidence is below "
-               "the threshold — a wrong line is worse than no line.")
+               f"{GEN}: {N['synthetic']['companies']:,} generated companies with a hidden "
+               f"answer key. {UKN}: {N['uk']['companies']} real UK government organisations, "
+               f"whose published reporting lines are the answer key. {ASX}: "
+               f"{N['real']['companies']} real leadership teams, where only the "
+               f"{COUNTS['confirmed_lines']} managers confirmed in writing serve as an answer "
+               f"key. {PDL}: {N['pdl']['people']} real people at {N['pdl']['companies']} "
+               "company, no answer key. All read from the database. No line is drawn when "
+               "confidence is below the threshold — a wrong line is worse than no line.")
 who = ("people with a confirmed manager" if REAL
-       else "people (excluding the top post)" if UK else "people (excluding CEOs)")
+       else "people (excluding the top post)" if UK
+       else "people with a known manager (none: no answer key)" if PDLCO
+       else "people (excluding CEOs)")
 answer_key = ("the companies' written statements" if REAL
               else "the published reporting lines" if UK else "the answer key")
 
@@ -492,7 +633,7 @@ if not cid:
     def pills():
         st.subheader("Companies")
         return st.pills("Dataset", list(DATASETS), selection_mode="multi", key="datasets",
-                        format_func=lambda k: DATASETS[k][0], label_visibility="collapsed")
+                        format_func=DATASETS.get, label_visibility="collapsed")
 
     chosen = ss.datasets           # the pills below; read now so the metrics come first
     if not chosen:
@@ -501,40 +642,40 @@ if not cid:
         st.stop()
     checked_who = {"synthetic": f"{GEN}: everyone except CEOs",
                    "uk": f"{UKN}: everyone except the top post",
-                   "real": f"{ASX}: only people with a confirmed manager"}
+                   "real": f"{ASX}: only people with a confirmed manager",
+                   "pdl": f"{PDL}: nobody (no answer key)"}
     key_of = {"synthetic": f"the answer key ({GEN})",
               "uk": f"the published reporting lines ({UKN})",
-              "real": f"the companies' written statements ({ASX})"}
+              "real": f"the companies' written statements ({ASX})",
+              "pdl": f"no answer key ({PDL})"}
     who = "people who can be checked (" + "; ".join(checked_who[k] for k in chosen) + ")"
     answer_key = " or ".join(key_of[k] for k in chosen)
-    s = apply_threshold(pd.concat([loaded[k][1] for k in chosen]), threshold)
-    coverage, precision = score(s)
     shown = companies[companies.dataset.isin(chosen)].reset_index(drop=True)
+    # Per company from the database: lines drawn, people scored, given a line, right
+    table = shown.merge(db(db_stats, threshold), on="company_id", how="left")
+    n_scored, n_given, n_right = (int(table[c].fillna(0).sum())
+                                  for c in ("scored", "given", "right"))
+    coverage = n_given / n_scored if n_scored else None
+    precision = n_right / n_given if n_given else None
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("Companies", f"{len(shown):,}")
-    c2.metric("People", f"{sum(len(loaded[k][0]) for k in chosen):,}")
-    c3.metric("Coverage", f"{coverage:.1%}",
+    c2.metric("People", f"{int(shown.employees.sum()):,}")
+    c3.metric("Coverage", pct(coverage),
               help=f"For the datasets selected below: share of {who} who got a manager "
-                   f"({len(s):,} people can be checked)")
+                   f"({n_scored:,} people can be checked)")
     if show_truth:
-        c4.metric("Precision", f"{precision:.1%}",
+        c4.metric("Precision", pct(precision),
                   help=f"For the datasets selected below: of the reporting lines drawn, the "
                        f"share that match {answer_key}")
     pills()
 
-    g = s.groupby("company_id")
-    every = pd.concat([loaded[k][0] for k in chosen])      # everyone, scored or not
-    drawn = every.pred_manager_id.notna() & (every.confidence >= threshold)
-    table = shown.set_index("company_id").join(pd.DataFrame({
-        "employees": every.groupby("company_id").size(),
-        "lines": drawn.groupby(every.company_id).sum(),
-        "coverage": 100 * g.given.mean(),
-        "precision": 100 * g.right.sum() / g.given.sum().where(g.given.sum() > 0),
-    })).reset_index()
+    table["lines"] = table.lines.fillna(0)
+    table["coverage"] = 100 * table.given / table.scored.where(table.scored > 0)
+    table["precision"] = 100 * table.right / table.given.where(table.given > 0)
     # Largest companies first (ties stay A-Z); header clicks can still re-sort
     table = table.sort_values("employees", ascending=False, kind="stable").reset_index(drop=True)
     ss.table_ids = table.company_id.tolist()      # row number -> company, for open_clicked
-    table["dataset"] = table.dataset.map(lambda k: DATASETS[k][0])
+    table["dataset"] = table.dataset.map(DATASETS.get)
     if "real" in chosen:
         st.caption(f"{ASX}: coverage and precision only count people whose manager "
                    "the company confirmed in writing; \"None\" = no such people at that "
@@ -559,13 +700,23 @@ if not cid:
     st.stop()
 
 # ================================================================ company page
-df, scored, emp, truth_small = loaded[dataset_of[cid]]    # this company's dataset
+# This company from the database: chart rows, scored rows, answer key (empty if new)
+df, scored, truth_small = db(db_company, cid, show_pdl_names())
 
 # What-if changes (this visitor only): re-run inference in memory for affected companies.
 # Only changes made in this company's dataset (people can't move between datasets).
 events = {k: [e for e in ss.whatif[k] if dataset_of.get(e["company_id"]) == dataset_of[cid]]
           for k in ("leavers", "added", "changes")}
-if cid in whatif.touched(emp, events):
+emp = None
+if any(events.values()):
+    # Rows needed by what-if: this company, every company with a change, and the companies
+    # leavers are moving to (found by name in the same dataset)
+    ids = {cid} | {e["company_id"] for k in events for e in events[k]}
+    ids |= set(db(dbread.companies_named,
+                  [lv["new_company"] for lv in events["leavers"] if lv["new_company"]],
+                  dbread.SOURCE_OF[dataset_of[cid]]))
+    emp = db(db_employees, tuple(sorted(ids - NEW_ORGS)), show_pdl_names())
+if emp is not None and cid in whatif.touched(emp, events):
     wp = whatif.apply(emp, events, current_judge())
     base = wp[wp.company_id == cid].merge(truth_small, on="employee_id", how="left")
     base["checkable"] = base.checkable.fillna(False)    # added / moved-in people
@@ -924,7 +1075,7 @@ with tab_reports:
 # ---------------------------------------------------------------- sources (real companies)
 if REAL or UK:
     st.markdown("##### Sources")
-    for s in load_sources()[lambda s: s.company_id == cid].itertuples():
+    for s in db(load_sources)[lambda s: s.company_id == cid].itertuples():
         if UK:
             st.markdown(f"- [Organogram file on data.gov.uk]({s.url}) — {s.what_it_shows}. "
                         f"Downloaded {when(s.date_checked)}. "

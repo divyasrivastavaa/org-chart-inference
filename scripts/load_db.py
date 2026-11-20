@@ -105,7 +105,7 @@ def counts(conn):
         order by 1, 2""").fetchall()
     totals = {t: conn.execute(f"select count(*) from {t}").fetchone()[0]       # fixed names
               for t in ["companies", "people", "employments", "reporting_lines", "runs",
-                        "answer_key"]}
+                        "answer_key", "sources"]}
     return totals, by_source
 
 
@@ -140,6 +140,18 @@ def main():
                             "on conflict (company_id, person_id) do nothing")
             print(f"{source:<14} read {len(companies):>3} companies, {len(people):>6,} people, "
                   f"{len(answers):>6,} answer-key rows")
+        # Where each real company / organisation comes from (shown under its chart)
+        src_file = ROOT / "data" / "real" / "sources.csv"
+        if src_file.exists():
+            src = pd.read_csv(src_file)
+            rows = [tuple(clean(v) for v in r) for r in src[
+                ["dataset", "company_id", "company_name", "url", "what_it_shows",
+                 "date_checked", "licence"]].itertuples(index=False)]
+            with conn.cursor() as cur:
+                copy_insert(cur, "sources", ["dataset", "company_id", "company_name", "url",
+                                             "what_it_shows", "date_checked", "licence"],
+                            rows, "on conflict (company_id, url, what_it_shows) do nothing")
+            print(f"sources        read {len(rows)} rows")
         after, by_source = counts(conn)
     print(f"\nLoaded in {time.time() - t0:.0f} s")
 
