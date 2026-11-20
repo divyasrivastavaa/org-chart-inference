@@ -20,7 +20,9 @@ create table runs (
     started_at           timestamptz not null default now(),
     finished_at          timestamptz,
     trigger              text not null default 'refresh'
-                         check (trigger in ('initial_load', 'refresh', 'app_change', 'manual')),
+                         check (trigger in ('initial_load', 'refresh', 'app_change', 'manual',
+                                            'pdl_import')),    -- a PDL API call (credits)
+    note                 text,                       -- e.g. the cache file of a PDL call
     status               text not null default 'running'
                          check (status in ('running', 'succeeded', 'failed')),
     error                text,                       -- filled when status = 'failed'
@@ -37,6 +39,7 @@ create table runs (
     check (finished_at is null or finished_at >= started_at)
 );
 create index runs_started_at_idx on runs (started_at desc);
+create unique index runs_pdl_import_note_idx on runs (note) where trigger = 'pdl_import';
 
 -- ------------------------------------------------------------------ companies
 create table companies (

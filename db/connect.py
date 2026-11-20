@@ -26,6 +26,14 @@ def _secrets():
     return st.secrets
 
 
+def get_secret(name, default=None):
+    """One secret by name (e.g. LOGFIRE_TOKEN), or default if it isn't set. Never printed."""
+    try:
+        return _secrets().get(name, default)
+    except Exception:                            # no secrets file and no Streamlit secrets
+        return default
+
+
 def get_connection(**kwargs):
     """A new psycopg connection. Use it as `with get_connection() as conn: ...`.
     Extra keyword arguments go to psycopg.connect (e.g. autocommit=True)."""

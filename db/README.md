@@ -82,6 +82,27 @@ order by run_id desc
 limit 20;
 ```
 
+**Total cost and credits per day and per trigger**
+
+```sql
+select started_at::date                           as day,
+       trigger,
+       count(*)                                   as runs,
+       sum(companies_processed)                   as companies,
+       sum(people_processed)                      as people,
+       sum(gemini_input_tokens)                   as gemini_input_tokens,
+       sum(gemini_output_tokens)                  as gemini_output_tokens,
+       sum(pdl_credits_used)                      as pdl_credits,
+       sum(cost_usd)                              as cost_usd
+from runs
+group by 1, 2
+order by 1 desc, 2;
+```
+
+Prices are set in `db/costs.py` (Gemini: list price per token, with its source link;
+PDL: $0 per credit on the free plan). PDL calls are recorded as runs with
+`trigger = 'pdl_import'` by `scripts/pdl_record_runs.py`.
+
 **5. People without a manager** (in one company, with the reason)
 
 ```sql
