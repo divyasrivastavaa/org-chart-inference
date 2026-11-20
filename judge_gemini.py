@@ -133,6 +133,7 @@ class GeminiJudge:
         self.cache = (json.loads(self.cache_path.read_text(encoding="utf-8"))
                       if self.cache_path and self.cache_path.exists() else {})
         self.calls = 0                                 # API calls made (cache hits excluded)
+        self.input_tokens = self.output_tokens = 0     # from Gemini's usage info (for cost)
 
     def _call(self, text):
         from google.genai import errors, types
@@ -149,6 +150,11 @@ class GeminiJudge:
                 self.calls += 1
                 out = self._client.models.generate_content(model=self.model, contents=text,
                                                            config=config)
+                usage = getattr(out, "usage_metadata", None)    # tokens billed for this call
+                if usage is not None:
+                    self.input_tokens += usage.prompt_token_count or 0
+                    self.output_tokens += ((usage.candidates_token_count or 0)
+                                           + (getattr(usage, "thoughts_token_count", 0) or 0))
                 return json.loads(out.text)
             except errors.APIError as e:
                 # The DAILY free-tier limit (e.g. 20 requests per model per day): retrying

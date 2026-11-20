@@ -21,7 +21,8 @@ import infer
 from db import connect
 
 # Dataset keys used by the app -> companies.source in the database
-SOURCE_OF = {"synthetic": "benchmark", "real": "asx_nzx", "uk": "uk_organogram", "pdl": "pdl"}
+SOURCE_OF = {"synthetic": "benchmark", "real": "asx_nzx", "uk": "uk_organogram", "pdl": "pdl",
+             "manual": "manual"}
 DATASET_OF_SOURCE = {v: k for k, v in SOURCE_OF.items()}
 # Same mapping as refresh.py: PDL department words -> the department names infer.py knows
 PDL_DEPARTMENTS = {"engineering": "Engineering", "sales": "Sales",
@@ -126,7 +127,11 @@ PEOPLE_SQL = """
            c.source as company_source, e.person_id as employee_id, p.full_name,
            p.source as person_source, e.title, e.department, e.location,
            rl.line_id, rl.proposed_manager_id as pred_manager_id, rl.confidence, rl.reason,
-           a.true_manager_id
+           rl.judge, a.true_manager_id,
+           -- saved after the company's last refresh, or the company has saved changes
+           -- (e.g. an undo reopened an old job): not placed yet
+           (c.last_refreshed_at is null or e.recorded_at > c.last_refreshed_at
+            or c.needs_refresh) as pending
     from employments e
     join people p    on p.person_id = e.person_id
     join companies c on c.company_id = e.company_id
@@ -155,15 +160,61 @@ def company(company_id, show_pdl):
     df["checkable"] = (df.company_source == "benchmark") | df.true_manager_id.notna()
     scored = df[df.true_manager_id.notna()][
         ["company_id", "employee_id", "true_manager_id", "pred_manager_id", "confidence"]]
-    if df.line_id.notna().any():               # refreshed: people with a line only
-        df = df[df.line_id.notna()]            # (exact duplicates were dropped by the rules)
+    # Refreshed: people with a line, plus people saved since the last refresh (waiting).
+    # (People without a line from before are exact duplicates the rules dropped.)
+    if df.line_id.notna().any():
+        df = df[df.line_id.notna() | df.pending.astype(bool)].copy()
+    waiting = df.line_id.isna()
+    df.loc[waiting, "reason"] = "waiting for refresh (saved change)"
+    df["judge"] = df.judge.fillna("rules")
     df["confidence"] = df.confidence.astype(float).fillna(0.0)
     parsed = [infer.parse_title(t, d) for t, d in zip(df.title, df.department)]
     df["level"] = [p[0] for p in parsed]
     df["function"] = [p[1] for p in parsed]
+    scored["confidence"] = scored.confidence.astype(float)
     truth = df[["employee_id", "true_manager_id", "checkable"]]
     chart = df.drop(columns=["line_id", "company_source"])
     return chart.reset_index(drop=True), scored.reset_index(drop=True), truth
+
+
+def pending_changes(company_id):
+    """Saved changes for this company that the last refresh hasn't used yet."""
+    return query("""
+        select l.change_id, l.created_at, l.kind, l.summary, l.judge
+        from change_log l join companies c on c.company_id = %s
+        where %s = any(l.company_ids) and l.undone_at is null
+          and (c.last_refreshed_at is null or l.created_at > c.last_refreshed_at)
+        order by l.change_id""", (company_id, company_id))
+
+
+def last_two_refreshes(company_id):
+    """The company's lines from its previous and its latest refresh (the cleanup rule keeps
+    exactly these two), with the answer key. Columns: run_id, employee_id, pred_manager_id,
+    confidence, reason, true_manager_id, started_at."""
+    df = query("""
+        with r as (select run_id from reporting_lines where company_id = %s
+                   group by run_id order by run_id desc limit 2)
+        select rl.run_id, ru.started_at, rl.person_id as employee_id,
+               rl.proposed_manager_id as pred_manager_id, rl.confidence, rl.reason,
+               a.true_manager_id
+        from reporting_lines rl
+        join r using (run_id)
+        join runs ru using (run_id)
+        left join answer_key a on a.person_id = rl.person_id and a.company_id = rl.company_id
+        where rl.company_id = %s""", (company_id, company_id))
+    df["confidence"] = df.confidence.astype(float)
+    return df
+
+
+def waiting_companies():
+    """How many companies have saved changes waiting for a refresh."""
+    return int(query("select count(*) as n from companies c where needs_refresh and exists "
+                     "(select 1 from employments e where e.company_id = c.company_id "
+                     "and e.is_current)").n[0])
+
+
+def saved_queries():
+    return query("select name, sql from saved_queries order by name")
 
 
 def employees(company_ids, show_pdl):

@@ -81,7 +81,7 @@ def main():
         print(f"{what:<13} {done['person_id']}: companies marked {done['companies']}")
 
     print()
-    run_id = refresh.main("manual")
+    run_id = refresh.main("manual")["run_id"]
     record["run_ids"].append(run_id)
     save(record)
 

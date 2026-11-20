@@ -29,6 +29,7 @@ import time
 import pandas as pd
 
 import infer
+import judge_gemini
 from db import costs, telemetry
 from db.connect import get_connection
 
@@ -70,15 +71,48 @@ def none_if_blank(v):
     return v.item() if hasattr(v, "item") else v
 
 
-def refresh_company(conn, run_id, cid, people_df):
+def gemini_people(conn):
+    """{company_id: {person_id, ...}} whose change (not undone, since the company's last
+    refresh) asked for the Gemini judge."""
+    out = {}
+    for cid, pid in conn.execute(
+            "select unnest(l.company_ids), l.person_id from change_log l "
+            "where l.judge = 'gemini' and l.undone_at is null and l.person_id is not null "
+            "and l.created_at > coalesce((select max(c.last_refreshed_at) from companies c "
+            "where c.company_id = any(l.company_ids)), '-infinity')").fetchall():
+        out.setdefault(cid, set()).add(pid)
+    return out
+
+
+def place_with_gemini(pred, wanted, judge, threshold):
+    """Gemini places the wanted people (from the rules' candidate lists); their rows get
+    judge 'gemini'. If Gemini fails, the rules' answer stays. Returns a note or None."""
+    pred["judge"] = "rules"
+    wanted = set(pred.employee_id) & set(wanted)
+    if not wanted or judge is None:
+        return None if not wanted else "no Gemini key: rules used"
+    try:
+        answers = judge_gemini.place(pred, wanted, judge)
+    except judge_gemini.JudgeError as e:
+        return f"Gemini failed ({e}): rules used"
+    for eid, a in answers.items():
+        row = pred.employee_id == eid
+        pred.loc[row, ["pred_manager_id", "confidence", "reason", "judge"]] = \
+            [a["manager_id"], a["confidence"], "Gemini: " + a["reason"], "gemini"]
+        pred.loc[row, "manager_id"] = a["manager_id"] if a["confidence"] >= threshold else None
+    return None
+
+
+def refresh_company(conn, run_id, cid, people_df, judge=None, wanted=()):
     """Infer one company and save its lines (one transaction). Returns counts for logging.
     infer.predict() treats every company on its own, so one company at a time gives the
-    same answer as all at once."""
+    same answer as all at once. wanted: people the Gemini judge should place (if given)."""
     pred, threshold, _ = infer.predict(people_df.drop(columns="company_source"))
+    note = place_with_gemini(pred, wanted, judge, threshold)
     has = pred.pred_manager_id.notna()
     values = [(run_id, cid, r.employee_id, int(r.employment_id),
                none_if_blank(r.pred_manager_id), none_if_blank(r.manager_id),
-               round(float(r.confidence), 3) if h else None, none_if_blank(r.reason))
+               round(float(r.confidence), 3) if h else None, none_if_blank(r.reason), r.judge)
               for r, h in zip(pred.itertuples(), has)]
     with conn.transaction():                          # one company: all or nothing
         conn.execute("update reporting_lines set is_current = false "
@@ -88,7 +122,7 @@ def refresh_company(conn, run_id, cid, people_df):
                 "proposed_manager_id, manager_id, confidence, reason, judge, is_current) "
                 "from stdin") as copy:
             for v in values:
-                copy.write_row((*v, "rules", True))
+                copy.write_row((*v, True))
         # Cleanup: keep only this company's lines from its last KEEP_REFRESHES refreshes.
         # (Employment history is never deleted.)
         deleted = conn.execute(
@@ -102,10 +136,13 @@ def refresh_company(conn, run_id, cid, people_df):
     top = int((pred.reason == "top of company").sum())
     return {"people": len(people_df), "lines_written": len(values), "lines_drawn": drawn,
             "not_placed": len(pred) - drawn - top, "lines_deleted": deleted,
-            "threshold": threshold}
+            "threshold": threshold, "gemini_placed": int((pred.judge == "gemini").sum()),
+            "note": note}
 
 
-def main(trigger="refresh"):
+def main(trigger="refresh", judge=None):
+    """judge: a judge_gemini.GeminiJudge to place the people whose change asked for Gemini
+    (their tokens and cost go into the runs row), or None = rules only."""
     lf_on = telemetry.sending()
     with get_connection(autocommit=True) as conn, \
             telemetry.span("refresh run ({trigger})", trigger=trigger) as run_span:
@@ -122,35 +159,53 @@ def main(trigger="refresh"):
                 "select company_id from companies c where needs_refresh and exists ("
                 "  select 1 from employments e where e.company_id = c.company_id "
                 "  and e.is_current) order by company_id").fetchall()]
+            model = getattr(judge, "model", costs.DEFAULT_GEMINI_MODEL)
+            calls0 = getattr(judge, "calls", 0)
+            notes = []
             if todo:
                 cur = conn.execute(CURRENT_EMPLOYEES, (todo,))
                 df = pd.DataFrame(cur.fetchall(), columns=[d.name for d in cur.description])
                 pdl = df.company_source == "pdl"
                 df.loc[pdl, "department"] = df.loc[pdl, "department"].map(PDL_DEPARTMENTS)
+                wanted = gemini_people(conn)              # people whose change asked Gemini
                 for cid, people_df in df.groupby("company_id"):
                     # Only IDs and counts go to Logfire: never names or titles
+                    use_gemini = bool(wanted.get(cid))
                     with telemetry.span("refresh company {company_id}", company_id=cid,
-                                        run_id=run_id, judge="rules") as span:
+                                        run_id=run_id,
+                                        judge="gemini" if use_gemini else "rules") as span:
                         t1 = time.time()
-                        n = refresh_company(conn, run_id, cid, people_df)
-                        cost = costs.run_cost()                  # rules: no tokens, $0
+                        tok0 = (getattr(judge, "input_tokens", 0),
+                                getattr(judge, "output_tokens", 0))
+                        n = refresh_company(conn, run_id, cid, people_df, judge,
+                                            wanted.get(cid, ()))
+                        cost = costs.run_cost(getattr(judge, "input_tokens", 0) - tok0[0],
+                                              getattr(judge, "output_tokens", 0) - tok0[1],
+                                              model=model)        # rules only: $0
                         span.set_attributes({
                             "people_processed": n["people"], "lines_drawn": n["lines_drawn"],
                             "not_placed": n["not_placed"], "lines_deleted": n["lines_deleted"],
+                            "gemini_placed": n["gemini_placed"],
                             "seconds": round(time.time() - t1, 3), "cost_usd": cost})
                     threshold = n.pop("threshold")
+                    if n["note"]:
+                        notes.append(f"{cid}: {n['note']}")
                     for k in totals:
                         totals[k] += n[k]
-            # Rules only: no Gemini tokens and no PDL credits in a refresh (yet)
-            gem_in = gem_out = credits = 0
-            cost = costs.run_cost(gem_in, gem_out, credits)
+            # Gemini tokens (if the judge was used) and no PDL credits in a refresh
+            gem_in = getattr(judge, "input_tokens", 0)
+            gem_out = getattr(judge, "output_tokens", 0)
+            gem_calls = getattr(judge, "calls", 0) - calls0
+            credits = 0
+            cost = costs.run_cost(gem_in, gem_out, credits, model=model)
             conn.execute(
                 "update runs set finished_at = now(), status = 'succeeded', "
                 "companies_processed = %s, people_processed = %s, lines_written = %s, "
-                "threshold = %s, gemini_calls = 0, gemini_input_tokens = %s, "
-                "gemini_output_tokens = %s, pdl_credits_used = %s, cost_usd = %s "
+                "threshold = %s, gemini_calls = %s, gemini_input_tokens = %s, "
+                "gemini_output_tokens = %s, pdl_credits_used = %s, cost_usd = %s, note = %s "
                 "where run_id = %s", (len(todo), totals["people"], totals["lines_written"],
-                                      threshold, gem_in, gem_out, credits, cost, run_id))
+                                      threshold, gem_calls, gem_in, gem_out, credits, cost,
+                                      "; ".join(notes)[:2000] or None, run_id))
             run_span.set_attributes({
                 "status": "succeeded", "companies_processed": len(todo),
                 "people_processed": totals["people"], "lines_drawn": totals["lines_drawn"],
@@ -172,7 +227,8 @@ def main(trigger="refresh"):
               f"({time.time() - t0:.1f} s, cost ${cost:.2f}; {logged})")
     else:
         print(f"Run {run_id}: no company needs a refresh; nothing done ({logged})")
-    return run_id
+    return {"run_id": run_id, "companies": todo, "people": totals["people"],
+            "lines_written": totals["lines_written"], "cost_usd": cost, "notes": notes}
 
 
 if __name__ == "__main__":

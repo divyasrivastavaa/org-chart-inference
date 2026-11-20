@@ -11,7 +11,6 @@ chart for this visitor only, in memory. Nothing is saved.
 Sidebar "Database": job history, runs & cost, read-only SQL.
 Run locally with:  streamlit run app.py
 """
-import copy
 import hmac
 import json
 import re
@@ -23,16 +22,18 @@ import streamlit as st
 
 import judge_gemini
 import org_chart
-import whatif
-from db import read as dbread
-from db.connect import get_secret
+import refresh
+import whatif                    # only its title checks (check_title, in_context)
+from db import changes, read as dbread
+from db.connect import get_connection, get_secret
 
 st.set_page_config(page_title="Org Chart Inference", layout="wide")
 ROOT = Path(__file__).resolve().parent
 # Internal key -> name shown in the app. Names say where the data comes from.
 DATASETS = {"synthetic": "Benchmark", "real": "ASX/NZX leadership",
-            "uk": "UK government organograms", "pdl": "PDL people (real)"}
-GEN, ASX, UKN, PDL = (DATASETS[k] for k in ("synthetic", "real", "uk", "pdl"))
+            "uk": "UK government organograms", "pdl": "PDL people (real)",
+            "manual": "Added in the app"}
+GEN, ASX, UKN, PDL, MAN = (DATASETS[k] for k in ("synthetic", "real", "uk", "pdl", "manual"))
 OGL = ("Contains public sector information licensed under the "
        "[Open Government Licence v3.0]"
        "(https://www.nationalarchives.gov.uk/doc/open-government-licence/version/3/).")
@@ -59,6 +60,25 @@ def show_pdl_names():
     return bool(st.session_state.get("pdl_ok"))
 
 
+def can_edit():
+    """True once this visitor entered the right DB_EDIT_PIN (changes the database)."""
+    return bool(st.session_state.get("edit_ok"))
+
+
+EDIT_NOTE = ("Changes are saved in the database for everyone. Enter the edit PIN in the "
+             "sidebar to make them; viewing works without it.")
+
+
+def flash(kind, text):
+    """A message shown once at the top of the next page (after a change or a refresh)."""
+    st.session_state.setdefault("flash", []).append((kind, text))
+
+
+def saved():
+    """After any write: forget cached reads so every page shows the database as it is."""
+    st.cache_data.clear()
+
+
 @st.cache_data(ttl=TTL, show_spinner=False)
 def db_companies():
     return dbread.companies()
@@ -82,11 +102,6 @@ def db_accuracy(threshold, company_ids):
 @st.cache_data(ttl=TTL, show_spinner=False)
 def db_company(company_id, show_pdl):
     return dbread.company(company_id, show_pdl)
-
-
-@st.cache_data(ttl=TTL, show_spinner=False)
-def db_employees(company_ids, show_pdl):
-    return dbread.employees(company_ids, show_pdl)
 
 
 @st.cache_data(ttl=TTL, show_spinner=False)
@@ -130,8 +145,9 @@ def judge_choice(key):
             st.caption("No Gemini API key is set (GEMINI_API_KEY in Streamlit secrets), so "
                        "the rules will place them.")
         else:
-            st.caption("Gemini chooses from the short list of candidate managers our rules "
-                       "find. Lines below the confidence threshold are not drawn.")
+            st.caption("At the next refresh, Gemini chooses from the short list of candidate "
+                       "managers our rules find; its tokens and cost go into that run. Lines "
+                       "below the confidence threshold are not drawn.")
     return choice
 
 
@@ -164,12 +180,9 @@ def pct(x, digits=1):
 
 ss = st.session_state
 ss.setdefault("table_version", 0)
-ss.setdefault("whatif", whatif.empty())
-ss.whatif.setdefault("new_orgs", [])
-ss.whatif.setdefault("changes", [])
-ss.setdefault("history", [])       # earlier versions of ss.whatif, for "Undo last change"
 ss.setdefault("datasets", list(DATASETS))
 ss.setdefault("pdl_ok", False)
+ss.setdefault("edit_ok", False)
 ss.datasets = ss.datasets          # keep the dataset buttons' choice while a company is open
 
 # ---------------------------------------------------------------- all datasets
@@ -186,10 +199,8 @@ COUNTS = db(db_counts)
 company_label = dict(zip(companies.company_id,
                          companies.company_name + " (" + companies.company_id + ")"))
 dataset_of = dict(zip(companies.company_id, companies.dataset))
-for o in ss.whatif["new_orgs"]:    # organisations this visitor created with "Add people"
-    company_label[o["company_id"]] = f"{o['company_name']} ({o['company_id']}, new)"
-    dataset_of[o["company_id"]] = o["dataset"]
-NEW_ORGS = {o["company_id"] for o in ss.whatif["new_orgs"]}
+# Organisations created in the app (saved in the database, source 'manual')
+NEW_ORGS = {c for c, d in dataset_of.items() if d == "manual"}
 st.query_params.pop("data", None)  # old links (?data=real&company=R01) still open R01
 
 # ---------------------------------------------------------------- which company is open?
@@ -340,10 +351,29 @@ def database_page():
         st.dataframe(runs, hide_index=True, width="stretch")
 
     with t_sql:
-        pick = st.selectbox("Example queries", ["(write your own)"] + list(dbread.EXAMPLES))
+        mine = db(dbread.saved_queries)               # saved from this tab (database)
+        queries = dict(dbread.EXAMPLES) | {f"Saved: {r.name}": r.sql for r in mine.itertuples()}
+        pick = st.selectbox("Example queries", ["(write your own)"] + list(queries),
+                            help="The 8 examples, then the queries saved here (\"Saved: …\").")
         sql = st.text_area("SQL: one SELECT or WITH statement",
-                           value=dbread.EXAMPLES.get(pick, "select * from companies"),
+                           value=queries.get(pick, "select * from companies"),
                            height=220, key=f"sql_{pick}")
+        s1, s2 = st.columns([3, 1], vertical_alignment="bottom")
+        name = s1.text_input("Name to save this query as", key="save_name",
+                             disabled=not can_edit(),
+                             placeholder="e.g. Engineering managers" if can_edit()
+                             else "needs the edit PIN")
+        if s2.button("Save query", icon=":material/save:", disabled=not can_edit(),
+                     help=None if can_edit() else EDIT_NOTE, width="stretch"):
+            _, problem = dbread.check_sql(sql)
+            if not name.strip():
+                st.warning("Give the query a name.")
+            elif problem:
+                st.warning(f"Not saved: {problem}")
+            else:
+                db(changes.save_query, name, sql)
+                saved()
+                st.success(f"Saved as \"{name.strip()}\": it is in the dropdown now.")
         st.caption("Read only: runs as a role that can only read this project's tables, "
                    "inside a READ ONLY transaction, stopped after 5 seconds, at most 500 rows "
                    "(LIMIT 500 is added if the query has no LIMIT). "
@@ -367,17 +397,39 @@ def database_page():
                 st.dataframe(result, hide_index=True, width="stretch")
 
 
-def remember():
-    """Before each change: keep a copy of the changes so far, for "Undo last change"."""
-    ss.history.append(copy.deepcopy(ss.whatif))
+def undo_last_change():
+    """Undo the newest change saved in the database (any company)."""
+    try:
+        ch = changes.undo_last()
+    except ValueError as e:
+        flash("warning", str(e))
+        return
+    except (psycopg.Error, RuntimeError):
+        flash("error", NOT_CONNECTED)
+        return
+    saved()
+    flash("success", f"Undone: {ch['summary']}. Marked for refresh: "
+                     f"{', '.join(ch['company_ids'])}.")
 
 
-def undo():
-    ss.whatif = ss.history.pop()
-
-
-def reset_all():
-    ss.whatif, ss.history = whatif.empty(), []
+def refresh_now():
+    """Sidebar: re-infer only the companies with saved changes; logs the run and its cost
+    (and sends it to Logfire). Gemini is only used for changes that asked for it."""
+    try:
+        with get_connection() as conn:
+            wanted = refresh.gemini_people(conn)
+        out = refresh.main("app_change", current_judge() if wanted else None)
+    except (psycopg.Error, RuntimeError):
+        flash("error", NOT_CONNECTED)
+        return
+    saved()
+    n = len(out["companies"])
+    flash("success" if n else "info",
+          f"Refreshed {n} compan{'y' if n == 1 else 'ies'}"
+          + (f" ({', '.join(out['companies'][:10])}{' …' if n > 10 else ''}): "
+             f"{out['people']:,} people, run {out['run_id']}, cost ${out['cost_usd']:.4f}."
+             if n else ": nothing was waiting.")
+          + ("".join(f" ⓘ {x}" for x in out["notes"])))
 
 
 def parse_people(table, text):
@@ -414,21 +466,14 @@ def add_people_dialog():
         text = st.text_area("One person per line: Name | Designation",
                             placeholder="Priya Shah | Chief Risk Officer\nData Engineer",
                             height=150, key="add_text")
-    st.caption("New people are placed by the normal rules and marked \"manually added\". "
-               "They have no answer key, so they never count in precision. This is only for "
-               "you, in this browser session: nothing is saved.")
+    st.caption("Saved in the database, with history, and marked \"manual\". They are placed "
+               "at the next refresh (\"Refresh changed companies\" in the sidebar). They have "
+               "no answer key, so they never count in precision.")
     judge = judge_choice("add_judge")
-    if not st.button("Add and place them", type="primary"):
+    if not st.button("Add and save them", type="primary"):
         return
     people = parse_people(table, text)
-    if to == NEW_ORG:
-        to_id, ds = f"N{len(ss.whatif['new_orgs']) + 1:02d}", "synthetic"
-        taken = set()
-    else:
-        to_id, ds = to, dataset_of[to]
-        taken = (set() if to in NEW_ORGS
-                 else db(dbread.names_in, to, show_pdl_names()))
-    taken |= {a["full_name"] for a in ss.whatif["added"] if a["company_id"] == to_id}
+    taken = set() if to == NEW_ORG else db(dbread.names_in, to, show_pdl_names())
     names = [n for n, _ in people if n]
     if to == NEW_ORG and not org_name.strip():
         st.error("Please give the new organisation a name.")
@@ -441,80 +486,86 @@ def add_people_dialog():
                  + ", ".join(sorted((set(names) & taken)
                                     | {n for n in names if names.count(n) > 1})))
     else:
-        remember()
-        if to == NEW_ORG:
-            ss.whatif["new_orgs"].append({"company_id": to_id, "dataset": ds,
-                                          "company_name": org_name.strip()})
-        k = 1
-        for name, desig in people:
-            while not name:                           # "Name (optional)": New hire 1, 2 …
-                name = f"New hire {k}" if f"New hire {k}" not in taken else ""
-                k += 1
-            taken.add(name)
-            ss.whatif["added"].append(whatif.person(
-                to_id, name, desig, company_name=org_name.strip() or None, judge=judge))
+        try:
+            with get_connection() as conn:            # one transaction: all saved, or none
+                to_id = (changes.add_company(org_name.strip(), conn=conn)["company_id"]
+                         if to == NEW_ORG else to)
+                k = 1
+                for name, desig in people:
+                    while not name:                   # "Name (optional)": New hire 1, 2 …
+                        name = f"New hire {k}" if f"New hire {k}" not in taken else ""
+                        k += 1
+                    taken.add(name)
+                    changes.add_person(name, to_id, desig, judge=judge, conn=conn)
+        except (psycopg.Error, RuntimeError):
+            st.error(NOT_CONNECTED)
+            return
+        saved()
+        flash("success", f"Saved: {len(people)} person(s) added to {to_id}. They are placed "
+                         "at the next refresh.")
         ss.open_next = to_id       # open the company to show where they landed
         ss.adding = False
         st.rerun()
 
 
 @st.dialog("Remove people", width="large", on_dismiss=lambda: set_flag("removing", False))
-def remove_people_dialog(cid, co, not_here):
-    people = co[~co.employee_id.isin(not_here)]
-    label = dict(zip(people.employee_id,
-                     people.full_name + " — " + people.title.fillna("(no title)")))
+def remove_people_dialog(cid, co):
+    label = dict(zip(co.employee_id, co.full_name + " — " + co.title.fillna("(no title)")))
     leaving = st.multiselect("Who is leaving?", list(label), format_func=label.get,
                              placeholder="Pick one or more people")
-    moving = st.text_input("Moving to (optional)", placeholder="e.g. Google")
-    st.caption("Their card stays on the chart, faded. The people who reported to them are "
-               "placed again by the normal rules, or wait for a new manager if no one fits. "
-               "Only for you, in this browser session: nothing is saved.")
+    moving = st.text_input("Moving to (optional)", placeholder="a company id or name, e.g. C002")
+    st.caption("Saved in the database: their job here is closed (kept in their job history). "
+               "If \"Moving to\" is a company in the database, they get a job there with the "
+               "same title. Their team is placed again at the next refresh.")
     judge = judge_choice("remove_judge")
-    if st.button("Remove and re-place their team", type="primary", disabled=not leaving):
-        remember()
-        boss = dict(zip(co.employee_id, co.manager_id))
-        for eid in leaving:
-            ss.whatif["leavers"].append(whatif.leaver(
-                cid, eid, people.loc[people.employee_id == eid, "full_name"].iloc[0], moving,
-                boss[eid] if isinstance(boss[eid], str) else None,
-                co.employee_id[co.manager_id == eid].tolist(), judge=judge))
-        ss.removing = False
-        st.rerun()
+    if not st.button("Remove them", type="primary", disabled=not leaving):
+        return
+    try:
+        with get_connection() as conn:                # one transaction: all saved, or none
+            done = [changes.remove_person(eid, moving.strip() or None, judge=judge, conn=conn)
+                    for eid in leaving]
+    except ValueError as e:
+        st.error(str(e))
+        return
+    except (psycopg.Error, RuntimeError):
+        st.error(NOT_CONNECTED)
+        return
+    saved()
+    moved = sorted({d["moved_to"] for d in done if d["moved_to"]})
+    flash("success", f"Saved: {len(done)} person(s) left {cid}"
+          + (f" and moved to {', '.join(moved)}" if moved else "")
+          + (f" (\"{moving.strip()}\" is not in the database, so they just left)"
+             if moving.strip() and not moved else "") + ".")
+    ss.removing = False
+    st.rerun()
 
 
 @st.dialog("Promote / change title", width="large",
            on_dismiss=lambda: set_flag("changing", False))
-def change_title_dialog(cid, co, not_here):
-    people = co[~co.employee_id.isin(not_here)]
-    label = dict(zip(people.employee_id,
-                     people.full_name + " — " + people.title.fillna("(no title)")))
+def change_title_dialog(cid, co):
+    label = dict(zip(co.employee_id, co.full_name + " — " + co.title.fillna("(no title)")))
     eid = st.selectbox("Who?", list(label), format_func=label.get, index=None,
                        placeholder="Pick a person")
     new_title = st.text_input("New job title", placeholder="e.g. VP Engineering")
-    vacant = st.checkbox("Leave old position vacant", value=True,
-                         help="On: a dashed vacant card keeps their old place and their team "
-                              "stays under it. Off: their team stays with them if that still "
-                              "fits, otherwise it is re-placed like a leaver's team.")
-    st.caption("The person stays, with the new title, and is placed again by the normal "
-               "rules. Never counted in precision. Only for you, in this browser session: "
-               "nothing is saved.")
+    st.caption("Saved in the database: their current job is closed and a new one opened with "
+               "the new title (both kept in their job history). They and their team are "
+               "placed again at the next refresh. Never counted in precision.")
     if not st.button("Apply change", type="primary", disabled=not eid or not new_title.strip()):
         return
-    problem = whatif.check_title(people, eid, new_title)
+    problem = whatif.check_title(co, eid, new_title)
     if problem:
         st.warning(problem)
         return
-    row = people[people.employee_id == eid].iloc[0]
-    old = whatif.in_context(people).loc[eid]
-    new = whatif.in_context(people, eid, new_title.strip()).loc[eid]
-    team = people[people.manager_id == eid]
-    names = dict(zip(co.employee_id, co.full_name))
-    remember()
-    ss.whatif["changes"].append(whatif.change(
-        cid, eid, row.full_name, row.title, new_title, vacant,
-        (old.level, old.function), (new.level, new.function), row.manager_id,
-        names.get(row.manager_id), row.confidence if pd.notna(row.manager_id) else 0.0,
-        dict(zip(team.employee_id, team.confidence))))
+    try:
+        changes.change_title(eid, new_title)
+    except ValueError as e:
+        st.warning(str(e))
+        return
+    except (psycopg.Error, RuntimeError):
+        st.error(NOT_CONNECTED)
+        return
+    saved()
+    flash("success", f"Saved: {label[eid].split(' — ')[0]} is now \"{new_title.strip()}\".")
     ss.changing = False
     st.rerun()
 
@@ -549,6 +600,34 @@ def check_pin():
     ss.pin_input = ""                           # never keep the PIN in the page
 
 
+waiting = db(dbread.waiting_companies)
+st.sidebar.button("Refresh changed companies", icon=":material/sync:", width="stretch",
+                  on_click=refresh_now, disabled=not can_edit(),
+                  help=("Re-infers only the companies with saved changes; logs the run and "
+                        "its cost.") if can_edit() else EDIT_NOTE)
+st.sidebar.caption(f"{waiting} compan{'y' if waiting == 1 else 'ies'} waiting for a refresh.")
+EDIT_PIN = get_secret("DB_EDIT_PIN")
+
+
+def check_edit_pin():
+    entered = ss.get("edit_pin_input", "")
+    ss.edit_ok = bool(EDIT_PIN) and hmac.compare_digest(str(entered), str(EDIT_PIN))
+    ss.edit_pin_wrong = bool(entered) and not ss.edit_ok
+    ss.edit_pin_input = ""                      # never keep the PIN in the page
+
+
+if ss.edit_ok:
+    st.sidebar.caption("Editing is on: changes are saved in the database.")
+    st.sidebar.button("Stop editing", on_click=set_flag, args=("edit_ok", False),
+                      width="stretch")
+elif EDIT_PIN:
+    st.sidebar.text_input("Edit PIN (to add, remove, promote, refresh)", type="password",
+                          key="edit_pin_input", on_change=check_edit_pin)
+    if ss.get("edit_pin_wrong"):
+        st.sidebar.caption(":red[Wrong edit PIN.]")
+else:
+    st.sidebar.caption("Editing is off (no DB_EDIT_PIN set).")
+
 if ss.pdl_ok:
     st.sidebar.caption("PDL people's names are shown.")
     st.sidebar.button("Hide PDL names", on_click=set_flag, args=("pdl_ok", False),
@@ -563,7 +642,7 @@ elif PIN:
 else:
     st.sidebar.caption("PDL people are shown as 'PDL person #id' (no DB_VIEW_PIN set).")
 
-if ss.get("adding"):
+if ss.get("adding") and can_edit():
     add_people_dialog()
 cid = ss.company_select
 if cid:
@@ -572,6 +651,8 @@ else:
     st.query_params.pop("company", None)
 
 st.title("Org Chart Inference")
+for kind, text in ss.pop("flash", []):          # result of the last change / refresh
+    getattr(st, kind)(text)
 if ss.get("db_view"):
     database_page()
     st.stop()
@@ -580,9 +661,10 @@ UK = bool(cid) and dataset_of[cid] == "uk" and cid not in NEW_ORGS
 PDLCO = bool(cid) and dataset_of[cid] == "pdl"
 N = {k: COUNTS.get(k, {"companies": 0, "people": 0}) for k in DATASETS}
 if cid in NEW_ORGS:
-    st.caption("**New organisation**, created by you in this browser session. Everyone here "
-               "was added by hand, so there is no answer key. No line is drawn when "
-               "confidence is below the threshold — a wrong line is worse than no line.")
+    st.caption(f"**Dataset: {MAN}.** An organisation created in the app and saved in the "
+               "database. Everyone here was added by hand, so there is no answer key. No line "
+               "is drawn when confidence is below the threshold — a wrong line is worse than "
+               "no line.")
 elif REAL:
     st.caption(f"**Dataset: {ASX}.** The leadership teams of {N['real']['companies']} "
                "ASX/NZX-listed companies, from each company's own website (14 Nov 2026). "
@@ -628,7 +710,9 @@ if not cid:
     st.write("Click a company's name to see its org chart. Filter by dataset, search with "
              "the magnifying glass (top right of the table), sort by clicking a column header.")
     st.button("Add people", icon=":material/add:", on_click=set_flag, args=("adding", True),
-              help="Add people to a company, or to a new organisation")
+              disabled=not can_edit(),
+              help="Add people to a company, or to a new organisation (saved in the "
+                   "database)" if can_edit() else EDIT_NOTE)
 
     def pills():
         st.subheader("Companies")
@@ -643,11 +727,12 @@ if not cid:
     checked_who = {"synthetic": f"{GEN}: everyone except CEOs",
                    "uk": f"{UKN}: everyone except the top post",
                    "real": f"{ASX}: only people with a confirmed manager",
-                   "pdl": f"{PDL}: nobody (no answer key)"}
+                   "pdl": f"{PDL}: nobody (no answer key)",
+                   "manual": f"{MAN}: nobody (no answer key)"}
     key_of = {"synthetic": f"the answer key ({GEN})",
               "uk": f"the published reporting lines ({UKN})",
               "real": f"the companies' written statements ({ASX})",
-              "pdl": f"no answer key ({PDL})"}
+              "pdl": f"no answer key ({PDL})", "manual": f"no answer key ({MAN})"}
     who = "people who can be checked (" + "; ".join(checked_who[k] for k in chosen) + ")"
     answer_key = " or ".join(key_of[k] for k in chosen)
     shown = companies[companies.dataset.isin(chosen)].reset_index(drop=True)
@@ -700,69 +785,44 @@ if not cid:
     st.stop()
 
 # ================================================================ company page
-# This company from the database: chart rows, scored rows, answer key (empty if new)
+# This company from the database: the current lines (last refresh), plus people saved since
+# then (waiting for a refresh), scored rows and the answer key. Nothing is kept in memory.
 df, scored, truth_small = db(db_company, cid, show_pdl_names())
-
-# What-if changes (this visitor only): re-run inference in memory for affected companies.
-# Only changes made in this company's dataset (people can't move between datasets).
-events = {k: [e for e in ss.whatif[k] if dataset_of.get(e["company_id"]) == dataset_of[cid]]
-          for k in ("leavers", "added", "changes")}
-emp = None
-if any(events.values()):
-    # Rows needed by what-if: this company, every company with a change, and the companies
-    # leavers are moving to (found by name in the same dataset)
-    ids = {cid} | {e["company_id"] for k in events for e in events[k]}
-    ids |= set(db(dbread.companies_named,
-                  [lv["new_company"] for lv in events["leavers"] if lv["new_company"]],
-                  dbread.SOURCE_OF[dataset_of[cid]]))
-    emp = db(db_employees, tuple(sorted(ids - NEW_ORGS)), show_pdl_names())
-if emp is not None and cid in whatif.touched(emp, events):
-    wp = whatif.apply(emp, events, current_judge())
-    base = wp[wp.company_id == cid].merge(truth_small, on="employee_id", how="left")
-    base["checkable"] = base.checkable.fillna(False)    # added / moved-in people
-else:
-    base = df[df.company_id == cid]
-co = apply_threshold(base, threshold)
-gone = co.left.astype(str) == "True" if "left" in co else pd.Series(False, index=co.index)
-left_ids = set(co.employee_id[gone])
-if left_ids:
-    co.loc[gone, "manager_id"] = co.loc[gone, "former_manager"]   # faded card at old place
-    # Whose manager in the answer key has left: that answer no longer applies
-    co.loc[co.true_manager_id.isin(left_ids), "checkable"] = False
-interim_ids = set(co.employee_id[co.interim == True]) if "interim" in co else set()  # noqa
-co.loc[co.employee_id.isin(interim_ids), "checkable"] = False     # interim: never scored
-vacant_ids = set(co.employee_id[co.vacant.astype(str) == "True"]) if "vacant" in co else set()
-not_here = vacant_ids | left_ids                 # cards without a person working here now
-# Title changes here: the people changed and their old teams are never scored
-my_changes = [c for c in events["changes"] if c["company_id"] == cid]
-changed_people = {c["employee_id"] for c in my_changes}
-changed_ids = changed_people | {e for c in my_changes for e in c["reports"]}
-co.loc[co.employee_id.isin(changed_ids) | co.true_manager_id.isin(changed_people),
-       "checkable"] = False
+co = apply_threshold(df, threshold)
+# A manager who left or moved since the last refresh is no longer on this chart: their team
+# shows as not placed until the next refresh
+gone_mgr = co.manager_id.notna() & ~co.manager_id.isin(set(co.employee_id))
+co.loc[gone_mgr, ["manager_id", "reason"]] = [None, "manager left (waiting for refresh)"]
+co["given"] = co.manager_id.notna()
+co["right"] = co.given & (co.manager_id == co.true_manager_id)
+co["judge"] = co.judge.map({"gemini": "Gemini"})   # the chart marks "placed by Gemini"
+left_ids, interim_ids, vacant_ids, not_here = set(), set(), set(), set()   # what-if only
+pending = db(dbread.pending_changes, cid)        # saved, not refreshed yet (not cached)
 functions = ["All"] + sorted(co.function.dropna().unique().tolist())
 func = domain_slot.selectbox("Domain", functions,
                              help="Show one function (Engineering, Sales …) under the CEO")
 
 # ---------------------------------------------------------------- buttons
+edit = can_edit()
+why_off = None if edit else EDIT_NOTE
 b1, b2, b3, b4, _ = st.columns([1.4, 1, 1.2, 1.7, 0.7])
 b1.button("Back to all companies", icon=":material/arrow_back:", on_click=back_to_all)
-b2.button("Add people", icon=":material/add:", on_click=set_flag, args=("adding", True))
+b2.button("Add people", icon=":material/add:", on_click=set_flag, args=("adding", True),
+          disabled=not edit, help=why_off)
 b3.button("Remove people", icon=":material/remove:", on_click=set_flag,
-          args=("removing", True))
+          args=("removing", True), disabled=not edit, help=why_off)
 b4.button("Promote / change title", icon=":material/swap_vert:", on_click=set_flag,
-          args=("changing", True))
-if ss.get("removing"):
-    remove_people_dialog(cid, co, not_here)
-if ss.get("changing"):
-    change_title_dialog(cid, co, not_here)
+          args=("changing", True), disabled=not edit, help=why_off)
+if not edit:
+    st.caption("ⓘ " + EDIT_NOTE)
+if ss.get("removing") and edit:
+    remove_people_dialog(cid, co)
+if ss.get("changing") and edit:
+    change_title_dialog(cid, co)
 
 # ---------------------------------------------------------------- headline numbers
 info = co.iloc[0]
-sc = scored[(scored.company_id == cid)
-            & ~scored.employee_id.isin(not_here | interim_ids | changed_ids)
-            & ~scored.true_manager_id.isin(left_ids | changed_people)][
-    ["employee_id", "true_manager_id"]].merge(
-    co[["employee_id", "pred_manager_id", "confidence"]], on="employee_id", how="left")
+sc = scored                                      # people with a known manager (last refresh)
 coverage, precision = score(apply_threshold(sc, threshold)) if len(sc) else (None, None)
 c1, c2, c3, c4 = st.columns(4)
 c1.metric("Employees", len(co) - len(not_here),
@@ -776,111 +836,17 @@ if show_truth:
     c4.metric("Precision", pct(precision),
               help=f"Of the reporting lines drawn, the share that match {answer_key}")
 
-# ---------------------------------------------------------------- what changed here?
-name_of = dict(zip(co.employee_id, co.full_name + " (" + co.title.fillna("") + ")"))
-notes = []
-for lv in events["leavers"]:
-    if lv["company_id"] == cid:
-        team = co[co.was_under == lv["full_name"]] if "was_under" in co else co.iloc[0:0]
-        interim = int((team.manager_id.notna() & team.employee_id.isin(interim_ids)).sum())
-        placed = int(team.manager_id.notna().sum()) - interim
-        notes.append(f"🚪 **{lv['full_name']}** left"
-                     + (f" → {lv['new_company']}" if lv["new_company"] else "")
-                     + f". {len(team)} direct report(s): {placed} re-placed, "
-                       f"{interim} interim under the CEO, "
-                       f"{len(team) - placed - interim} waiting for a new manager"
-                     + (" (placed by Gemini)." if (team.get("judge") == "Gemini").any()
-                        else "."))
-
-def change_lines(i, ch):
-    """What step i (a title change) did: title, level, department, manager."""
-    nxt = next((c for c in my_changes[i + 1:] if c["employee_id"] == ch["employee_id"]), None)
-    if nxt:                       # changed again later: this step ended where that one began
-        mgr, conf, why = nxt["old_manager_name"], nxt["old_confidence"], None
-    else:                         # the chart as shown now
-        r = co[co.employee_id == ch["employee_id"]].iloc[0]
-        mgr = (co.full_name[co.employee_id == r.manager_id].iloc[0]
-               if pd.notna(r.manager_id) else None)
-        conf, why = r.confidence, r.reason if isinstance(r.reason, str) and r.reason else None
-    show = lambda x: "?" if x is None else x                                # noqa: E731
-    same = ch["old_function"] == ch["new_function"]
-    return [f"title: {show(ch['old_title'])} → {ch['new_title']}",
-            f"level: {show(ch['old_level'])} → {show(ch['new_level'])} ({ch['kind']})",
-            f"department: {show(ch['old_function'])} → {show(ch['new_function'])} ("
-            + ("same department" if same else "moved to a different department") + ")",
-            f"manager: {ch['old_manager_name'] or 'not placed'} → "
-            + (f"{mgr} (confidence {conf:.2f})" if mgr
-               else "not placed" + (f" ({why})" if why else ""))]
-
-
-latest = {}                       # person -> their last change, for the card and the CSV
-for i, ch in enumerate(my_changes):
-    lines = change_lines(i, ch)
-    latest[ch["employee_id"]] = (ch, lines)
-    team = co[co.employee_id.isin(ch["reports"]) & ~co.employee_id.isin(left_ids)]
-    if team.empty:
-        about = "no direct reports"
-    elif ch["vacant"]:
-        about = (f"{len(team)} direct report(s) stay under the vacant "
-                 f"\"{ch['old_title']}\" position")
-    else:
-        drawn = team.manager_id.notna()
-        stayed = int((team.manager_id == ch["employee_id"]).sum())
-        interim = int((drawn & team.employee_id.isin(interim_ids)).sum())
-        about = (f"{len(team)} direct report(s): {stayed} stayed with them, "
-                 f"{int(drawn.sum()) - stayed - interim} re-placed, {interim} interim under "
-                 f"the CEO, {len(team) - int(drawn.sum())} waiting for a new manager")
-    notes.append(f"🔀 **{ch['full_name']}**: {ch['kind']}  \n" + "  \n".join(lines + [about]))
-co["change_note"] = co.employee_id.map(lambda e: "\n".join(latest[e][1]) if e in latest
-                                       else None)
-tagged = co[co.tag.notna() & ~co.employee_id.isin(not_here)] if "tag" in co else co.iloc[0:0]
-for r in tagged.itertuples():
-    where = (f"reports to {name_of[r.manager_id]}, confidence {r.confidence:.2f}"
-             if pd.notna(r.manager_id) else f"no manager drawn — {r.reason}")
-    by = " · placed by Gemini" if getattr(r, "judge", None) == "Gemini" else ""
-    notes.append(f"➕ **{r.full_name}** ({r.title}, {r.tag}{by}): {where}")
-# Gemini was chosen but couldn't be used: say so (rules placed them instead)
-fallbacks = sorted(set(co.judge.dropna()) - {"Gemini"}) if "judge" in co else []
-if notes:
+# ---------------------------------------------------------------- saved changes, waiting
+if len(pending):
     with st.container(border=True):
-        st.caption("Your changes (only for you, in this browser session; nothing is saved)")
-        for n in notes:
-            st.markdown(n)
-        for f in fallbacks:
-            st.caption(f"ⓘ Gemini was chosen, but it couldn't be used, so these people were "
-                       f"placed by the {f}.")
-
-def chart_csv(co):
-    """The chart as it is on screen now (this threshold, these changes), one row each."""
-    def status(r):
-        if r.employee_id in left_ids:
-            return "left" + (f" → {r.left_to}" if isinstance(r.left_to, str) and r.left_to
-                             else "")
-        if r.employee_id in vacant_ids:
-            note = getattr(r, "vacancy_note", None)
-            return "vacant position" + (f" ({note})" if isinstance(note, str) else "")
-        why = getattr(r, "was_under_why", None)
-        parts = [f"{why if isinstance(why, str) else 'manager left'}, was under {r.was_under}"] \
-            if isinstance(getattr(r, "was_under", None), str) else []
-        if r.employee_id in interim_ids and pd.notna(r.manager_id):
-            parts.insert(0, "interim, reports to CEO")
-        if isinstance(getattr(r, "tag", None), str):
-            parts.append(r.tag)
-        return "; ".join(parts)
-    here = ~co.employee_id.isin(left_ids)
-    return pd.DataFrame({
-        "employee_id": co.employee_id, "name": co.full_name, "title": co.title,
-        "domain": co.function, "manager_id": co.manager_id,
-        "manager_name": co.manager_id.map(dict(zip(co.employee_id, co.full_name))),
-        "confidence": co.confidence.where(co.manager_id.notna() & here).round(3),
-        "reason_no_manager": co.reason.where(co.manager_id.isna()),
-        "status": [status(r) for r in co.itertuples()],
-        # The person's last title change on this chart (blank if none)
-        **{col: co.employee_id.map(lambda e, k=key: latest[e][0][k] if e in latest else None)
-           for col, key in [("change_type", "kind"), ("old_title", "old_title"),
-                            ("old_level", "old_level"), ("old_function", "old_function"),
-                            ("old_manager", "old_manager_name")]},
-    }).to_csv(index=False).encode("utf-8-sig")   # with BOM: Excel then reads "→" correctly
+        st.caption(f"Saved changes waiting for a refresh ({len(pending)}). They are in the "
+                   "database; the chart is updated by \"Refresh changed companies\" in the "
+                   "sidebar.")
+        for r in pending.itertuples():
+            st.markdown(f"- {r.summary}" + (" · Gemini will place them" if r.judge == "gemini"
+                                            else ""))
+latest = {}                       # (the in-memory what-if's per-person notes: none any more)
+co["change_note"] = None
 
 
 # ---------------------------------------------------------------- tabs: People, Org chart, Reports
@@ -970,13 +936,14 @@ with tab_chart:
         h2.button("Clear highlight", on_click=set_flag, args=("highlight", None))
     # Our own HTML: names and titles are escaped inside org_chart.py before display
     st.iframe(org_chart.render_html(view, show_truth, pick), height=720)
-    u1, u2, u3, _ = st.columns([1.2, 1.2, 1.1, 2.5])
-    u1.button("Undo last change", icon=":material/undo:", on_click=undo,
-              disabled=not ss.history)
-    u2.button("Reset to original", icon=":material/restart_alt:", on_click=reset_all,
-              disabled=not ss.history)
-    u3.download_button("Download CSV", chart_csv(co), file_name=f"org_chart_{cid}.csv",
-                       mime="text/csv", icon=":material/download:", on_click="ignore")
+    last = db(changes.last_change)                # newest saved change (any company)
+    u1, u2 = st.columns([1.2, 4])
+    u1.button("Undo last change", icon=":material/undo:", on_click=undo_last_change,
+              disabled=not (edit and last),
+              help=(f"Undo: {last['summary']}" if last else "Nothing to undo")
+              if edit else EDIT_NOTE)
+    if last:
+        u2.caption(f"Last saved change: {last['summary']}")
 
 
 def counts(frame, gone=frozenset(), interim=frozenset(), vacant=frozenset()):
@@ -1033,44 +1000,55 @@ with tab_reports:
         a3.metric("People checked", len(sc),
                   help=f"{who.capitalize()}; changes you made here are never counted")
 
-    # ------------------------------------------------ Before vs Now (what-if changes)
-    rows = []
-    for lv in events["leavers"]:
-        if lv["company_id"] == cid:
-            rows.append(("left", lv["full_name"], f"moved to {lv['new_company']}"
-                         if lv["new_company"] else "left the company"))
-    for r in tagged.itertuples():
-        where = (f"reports to {names_by_id.get(r.manager_id)}" if pd.notna(r.manager_id)
-                 else "top of company" if r.reason == "top of company" else "not placed")
-        rows.append(("joined" if r.tag.startswith("joined") else "added", r.full_name,
-                     f"{r.title} · {r.tag} · {where}"))
-    for ch in my_changes:
-        detail = f"{ch['old_title']} → {ch['new_title']}"
-        if ch["old_function"] != ch["new_function"]:
-            detail += f" · {ch['old_function']} → {ch['new_function']}"
-        if ch["vacant"]:
-            detail += " · old position left vacant"
-        rows.append((KIND_WORD.get(ch["kind"], "title changed"), ch["full_name"], detail))
-    if rows:
-        st.markdown("**Before vs Now** (your changes, only for you in this browser session)")
-        st.dataframe(pd.DataFrame(rows, columns=["Change", "Person", "Details"]),
-                     hide_index=True, width="stretch")
-        before = (apply_threshold(df[df.company_id == cid], threshold)
-                  if cid not in NEW_ORGS else co.iloc[0:0])
-        # One text row per measure, built in full first: no column changes type later
-        n_before = counts(before)
-        lines = [(k, str(n_before[k]), str(n_now[k]), f"{n_now[k] - n_before[k]:+d}")
-                 for k in n_now]
+    # ------------------------------------------------ Before vs Now (last two refreshes)
+    hist = db(dbread.last_two_refreshes, cid)
+    run_ids = sorted(hist.run_id.unique())
+    if len(run_ids) == 2:
+        before = apply_threshold(hist[hist.run_id == run_ids[0]], threshold)
+        after = apply_threshold(hist[hist.run_id == run_ids[1]], threshold)
+        when_ = {r: f"{t:%d %b %H:%M}" for r, t in zip(hist.run_id, hist.started_at)}
+        st.markdown(f"**Before vs Now**: previous refresh (run {run_ids[0]}, "
+                    f"{when_[run_ids[0]]}) vs latest refresh (run {run_ids[1]}, "
+                    f"{when_[run_ids[1]]}), from the database")
+        both = before[["employee_id", "manager_id"]].merge(
+            after[["employee_id", "manager_id"]], on="employee_id", how="outer",
+            suffixes=("_before", "_now"), indicator=True)
+
+        def who_(x):
+            return "—" if pd.isna(x) else names_by_id.get(x, x)
+
+        rows = []
+        for r in both.itertuples():
+            if r._4 == "left_only":
+                rows.append(("not on the chart now", who_(r.employee_id),
+                             f"was under {who_(r.manager_id_before)}"))
+            elif r._4 == "right_only":
+                rows.append(("new on the chart", who_(r.employee_id),
+                             f"now under {who_(r.manager_id_now)}"))
+            elif not (pd.isna(r.manager_id_before) and pd.isna(r.manager_id_now))                     and r.manager_id_before != r.manager_id_now:
+                rows.append(("manager changed", who_(r.employee_id),
+                             f"{who_(r.manager_id_before)} → {who_(r.manager_id_now)}"))
+        if rows:
+            st.dataframe(pd.DataFrame(rows, columns=["Change", "Person", "Details"]),
+                         hide_index=True, width="stretch")
+        else:
+            st.caption("No reporting line changed between these two refreshes.")
+        n_before, n_after = counts(before), counts(after)
+        keep = ["People", "Lines drawn", "Not placed"]
+        lines = [(k, str(n_before[k]), str(n_after[k]), f"{n_after[k] - n_before[k]:+d}")
+                 for k in keep]
         if show_truth:
-            sc0 = scored[scored.company_id == cid]
-            cov0, prec0 = score(apply_threshold(sc0, threshold)) if len(sc0) else (None, None)
-            lines += [("Coverage", pct(cov0, 0), pct(coverage, 0), ""),
-                      ("Precision", pct(prec0), pct(precision), "")]
+            def acc(frame):
+                f = frame[frame.true_manager_id.notna()]
+                return score(f) if len(f) else (None, None)
+            (cov0, prec0), (cov1, prec1) = acc(before), acc(after)
+            lines += [("Coverage", pct(cov0, 0), pct(cov1, 0), ""),
+                      ("Precision", pct(prec0), pct(prec1), "")]
         st.dataframe(pd.DataFrame(lines, columns=["", "Before", "Now", "Change"]),
                      hide_index=True, width="stretch")
-        if show_truth:
-            st.caption("\"Now\" precision and coverage leave out the people you changed and "
-                       "their teams, so they are not exactly comparable.")
+    elif len(run_ids) == 1:
+        st.caption("Before vs Now appears after this company's next refresh (it compares the "
+                   "previous refresh with the latest one).")
 
 # ---------------------------------------------------------------- sources (real companies)
 if REAL or UK:

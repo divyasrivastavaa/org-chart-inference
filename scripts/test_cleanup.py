@@ -125,7 +125,7 @@ def main():
         done = changes.change_title(PERSON, title)
         s["opened"] += done["opened"]
         SAVE.write_text(json.dumps(s), encoding="utf-8")
-        run = refresh.main("manual")
+        run = refresh.main("manual")["run_id"]
         s["runs"].append(run)
         SAVE.write_text(json.dumps(s), encoding="utf-8")
         with get_connection() as c:

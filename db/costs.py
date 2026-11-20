@@ -20,7 +20,8 @@ PDL_PRICE_PER_CREDIT = 0.0
 
 
 def gemini_cost(input_tokens, output_tokens, model=DEFAULT_GEMINI_MODEL):
-    price = GEMINI_PRICE_PER_MILLION[model]
+    # A model without a price here is costed at the default model's price
+    price = GEMINI_PRICE_PER_MILLION.get(model, GEMINI_PRICE_PER_MILLION[DEFAULT_GEMINI_MODEL])
     return (input_tokens * price["input"] + output_tokens * price["output"]) / 1_000_000
 
 
