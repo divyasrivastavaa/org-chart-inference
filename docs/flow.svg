@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 640" width="1000" height="640"
      role="img" aria-labelledby="t">
-  <title id="t">How Org Chart Inference works: data, inference, decide and score</title>
+  <title id="t">How Org Chart Inference works: data into the database, inference, decide, score and refresh</title>
   <defs>
     <marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7"
             orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="#8a93a3"/></marker>
@@ -28,34 +28,43 @@
 
   <!-- 1 · Data -->
   <text class="s" x="20" y="72">1 · Data</text>
-  <rect class="box blue" x="20" y="84" width="306" height="108" rx="8"/>
+  <rect class="box blue" x="20" y="84" width="231" height="108" rx="8"/>
   <text class="b" x="34" y="108">Benchmark generator</text>
   <text class="m" x="34" y="126">generate_data.py</text>
   <text class="t" x="34" y="146">500 companies, messy titles,</text>
-  <text class="t" x="34" y="162">hidden answer key with every manager</text>
-  <text class="t" x="34" y="178">seed 42 app · 7 held out · 1 training</text>
+  <text class="t" x="34" y="162">answer key with every manager</text>
+  <text class="t" x="34" y="178">seeds 42 (app), 7 (held out)</text>
 
-  <rect class="box blue" x="337" y="84" width="306" height="108" rx="8"/>
-  <text class="b" x="351" y="108">UK government organograms</text>
-  <text class="m" x="351" y="126">scripts/build_uk.py · data/raw/uk/</text>
-  <text class="t" x="351" y="146">12 organisations, 2,281 posts (data.gov.uk)</text>
-  <text class="t" x="351" y="162">answer key: the published “reports to”</text>
-  <text class="t" x="351" y="178">Open Government Licence v3.0</text>
+  <rect class="box blue" x="263" y="84" width="231" height="108" rx="8"/>
+  <text class="b" x="277" y="108">UK government organograms</text>
+  <text class="m" x="277" y="126">scripts/build_uk.py</text>
+  <text class="t" x="277" y="146">12 organisations, 2,281 posts</text>
+  <text class="t" x="277" y="162">answer key: “reports to” column</text>
+  <text class="t" x="277" y="178">Open Government Licence v3.0</text>
 
-  <rect class="box blue" x="654" y="84" width="326" height="108" rx="8"/>
-  <text class="b" x="668" y="108">ASX/NZX leadership</text>
-  <text class="m" x="668" y="126">scripts/build_real.py (+ _truth.py)</text>
-  <text class="t" x="668" y="146">20 real companies, 218 leaders, source URLs</text>
-  <text class="t" x="668" y="162">small hand-made answer key: 43 confirmed</text>
-  <text class="t" x="668" y="178">lines (12 explicit + 31 team statements)</text>
+  <rect class="box blue" x="506" y="84" width="231" height="108" rx="8"/>
+  <text class="b" x="520" y="108">ASX/NZX leadership</text>
+  <text class="m" x="520" y="126">scripts/build_real.py</text>
+  <text class="t" x="520" y="146">20 companies, 218 leaders</text>
+  <text class="t" x="520" y="162">answer key: 43 lines confirmed</text>
+  <text class="t" x="520" y="178">in the companies’ own sources</text>
 
-  <path class="ar" d="M173 192 V214"/>
-  <path class="ar" d="M490 192 V214"/>
-  <path class="ar" d="M817 192 V214"/>
+  <rect class="box blue" x="749" y="84" width="231" height="108" rx="8"/>
+  <text class="b" x="763" y="108">People Data Labs</text>
+  <text class="m" x="763" y="126">scripts/pdl_load.py (cached)</text>
+  <text class="t" x="763" y="146">50 senior people at 1 company,</text>
+  <text class="t" x="763" y="162">with their job history</text>
+  <text class="t" x="763" y="178">real people: names need a PIN</text>
+
+  <path class="ar" d="M135 192 V214"/>
+  <path class="ar" d="M378 192 V214"/>
+  <path class="ar" d="M621 192 V214"/>
+  <path class="ar" d="M864 192 V214"/>
 
   <rect class="box blue" x="20" y="216" width="960" height="58" rx="8"/>
-  <text class="b" x="36" y="239">Every dataset holds the same files</text>
-  <text class="t" x="36" y="261"><tspan class="mi">employees.csv</tspan> what the model sees  ·  <tspan class="mi">truth.csv</tspan> answer key, never shown to the model  ·  <tspan class="mi">predictions.csv</tspan> written by the model</text>
+  <text class="b" x="36" y="239">Supabase Postgres: the app reads and writes only here</text>
+  <text class="m" x="440" y="239">scripts/load_db.py imports the CSVs once</text>
+  <text class="t" x="36" y="261"><tspan class="mi">employments</tspan> job history, never overwritten  ·  <tspan class="mi">reporting_lines</tspan> written by the model  ·  <tspan class="mi">answer_key</tspan> never shown to the model  ·  <tspan class="mi">runs</tspan> time and cost</text>
 
   <!-- 2 · Inference -->
   <path class="ar" d="M232 274 V320"/>
@@ -98,11 +107,11 @@
   <path class="ar" d="M490 384 H508"/>
   <path class="ar" d="M735 384 H753"/>
 
-  <!-- 3 · Decide and score -->
+  <!-- 3 · Decide, score and refresh -->
   <path class="ar" d="M812 446 V466 H270 V498"/>
   <path class="ar" d="M930 498 V448" stroke-dasharray="4 3"/>
   <text class="m" x="938" y="478">re-runs</text>
-  <text class="s" x="20" y="490">3 · Decide and score</text>
+  <text class="s" x="20" y="490">3 · Decide, score and refresh</text>
 
   <rect class="box green" x="20" y="500" width="300" height="118" rx="8"/>
   <text class="b" x="36" y="524">Draw only if confidence ≥ 0.7</text>
@@ -112,20 +121,20 @@
 
   <rect class="box green" x="340" y="500" width="300" height="118" rx="8"/>
   <text class="b" x="356" y="524">Score</text>
-  <text class="m" x="404" y="524">evaluate.py</text>
-  <text class="t" x="356" y="544">precision · coverage · calibration · Brier</text>
-  <text class="t" x="356" y="562">Benchmark seed 42: 95.2% prec., 62.7% cov.</text>
-  <text class="t" x="356" y="578">held-out seed 7: 95.4%, 63.7%</text>
+  <text class="m" x="404" y="524">vs. answer_key</text>
+  <text class="t" x="356" y="544">precision · coverage (from the database)</text>
+  <text class="t" x="356" y="562">Benchmark seed 42: 95.8% prec., 63.1% cov.</text>
+  <text class="t" x="356" y="578">held-out seed 7 (files): 95.4%, 63.7%</text>
   <text class="t" x="356" y="594">UK test half: 85.0%, 25.3%</text>
   <text class="t" x="356" y="610">ASX/NZX: 36 of 36 right, 84% coverage</text>
 
   <rect class="box green" x="660" y="500" width="320" height="118" rx="8"/>
-  <text class="b" x="676" y="524">What-if</text>
-  <text class="m" x="744" y="524">whatif.py</text>
-  <text class="t" x="676" y="544">add · remove · promote or change title</text>
-  <text class="t" x="676" y="562">a leaver’s team moves to the CEO as interim</text>
-  <text class="t" x="676" y="578">if no one senior is left (confidence 0.75)</text>
-  <text class="t" x="676" y="598">in memory, per visitor, never saved</text>
+  <text class="b" x="676" y="524">Changes and refresh</text>
+  <text class="m" x="830" y="524">refresh.py</text>
+  <text class="t" x="676" y="544">add · remove · promote · change job: saved</text>
+  <text class="t" x="676" y="562">with history (needs the edit PIN)</text>
+  <text class="t" x="676" y="580">only changed companies are re-inferred</text>
+  <text class="t" x="676" y="598">each run logged: time, cost · Logfire</text>
 
   <path class="ar" d="M320 559 H338"/>
 </svg>

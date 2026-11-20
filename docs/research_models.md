@@ -39,7 +39,7 @@ Every edge the rules propose becomes one training row. The label is
 | `HistGradientBoostingClassifier` + `CalibratedClassifierCV(method="isotonic")` | usually ranks edges better and gives smoother, calibrated scores | harder to explain |
 | `LogisticRegression` | simple baseline | misses interactions (e.g. "no team" only matters at IC level) |
 
-Plan: start with the tree (it is the story for the interview), and report boosting next to it.
+Plan: start with the tree (it is the easiest model to explain), and report boosting next to it.
 
 ### How to measure
 - Brier score and a calibration table (predicted vs actual accuracy per band). Today the
@@ -52,7 +52,7 @@ rules picked. Take the top candidate if its probability is above the threshold *
 above the runner-up; otherwise abstain. This could recover some of the abstentions
 ("2 possible managers in team").
 
-### Circularity caveat (likely interview question)
+### Circularity caveat
 The model learns the mess our own generator creates. To test how well it generalises,
 **train on one mess setting and test on another**, e.g. train on today's data, test on the
 upgraded generator (2-manager teams, missing middle managers, "Founder & CEO", contractors).

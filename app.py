@@ -255,9 +255,11 @@ def flow_svg():
     new = {
         r">\d[\d,]* companies, messy titles,<":
             f">{COUNTS['synthetic']['companies']:,} companies, messy titles,<",
-        r">\d+ organisations, [\d,]+ posts \(data\.gov\.uk\)<":
-            f">{COUNTS['uk']['companies']} organisations, {COUNTS['uk']['people']:,} posts "
-            "(data.gov.uk)<",
+        r">\d+ organisations, [\d,]+ posts<":
+            f">{COUNTS['uk']['companies']} organisations, {COUNTS['uk']['people']:,} posts<",
+        r">\d+ senior people at \d+ company,<":
+            f">{COUNTS.get('pdl', {}).get('people', 0)} senior people at "
+            f"{COUNTS.get('pdl', {}).get('companies', 0)} company,<",
         r">Benchmark seed 42: [^<]*<":
             f">Benchmark seed 42: {pct(gen['precision'])} prec., {pct(gen['coverage'])} cov.<",
         r">UK test half: [^<]*<":
