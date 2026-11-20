@@ -80,7 +80,7 @@ for source, folder in FOLDERS.items():
 table = pd.DataFrame(rows)
 table["precision"] = table.precision.map("{:.1%}".format)
 table["coverage"] = table.coverage.map("{:.1%}".format)
-print("Precision and coverage, same companies (20 ASX/NZX, U01-U02, C001-C010):\n")
+print("Precision and coverage, same companies (every company in the database):\n")
 print(table.to_string(index=False))
 print("\nCompanies where database and CSV differ:")
 print(pd.DataFrame(per_company).to_string(index=False) if per_company else "  none")

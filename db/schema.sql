@@ -119,7 +119,8 @@ create function mark_company_for_refresh() returns trigger
 language plpgsql as $$
 begin
     if new.is_current or (tg_op = 'UPDATE' and old.is_current) then
-        update companies set needs_refresh = true where company_id = new.company_id;
+        update companies set needs_refresh = true
+        where company_id = new.company_id and not needs_refresh;   -- only if not flagged yet
     end if;
     return new;
 end;

@@ -197,3 +197,51 @@ with a `run_id`. Sample in the database: 20 ASX/NZX, UK U01-U02, Benchmark C001-
   refreshed 0 companies.
 - **Held-out seed 7 and the full Benchmark:** not run from the database yet; they stay as
   CSV, so their baseline numbers are unchanged.
+
+## E9. Phase 2: full data in the database (20 Nov 2026)
+Not a model change. All 500 Benchmark companies (seed 42) and all 12 UK organisations are
+now in the database too, imported once from the CSVs.
+- **Import:** `scripts/load_db.py`, using Postgres COPY. 135 s; a rerun takes 19 s and adds
+  0 rows.
+- **Refresh:** `refresh.py` (run 11) inferred the 500 new companies in 212 s, $0.
+- **Compared** with `scripts/compare_db_csv.py`, on the same companies:
+
+| Threshold 0.7 | People scored | Drawn | Right | Wrong | Precision | Coverage |
+|---|---|---|---|---|---|---|
+| Benchmark seed 42 (500), database | 157,323 | 99,194 | 95,025 | 4,169 | 95.8% | 63.1% |
+| Benchmark seed 42 (500), CSV | 157,323 | 98,684 | 93,957 | 4,727 | 95.2% | 62.7% |
+| UK (all 12), database = CSV | 2,269 | 426 | 360 | 66 | 84.5% | 18.8% |
+| ASX/NZX (20), database = CSV | 43 | 36 | 36 | 0 | 100% | 83.7% |
+
+- **UK and ASX/NZX are identical.** The UK row is all 12 organisations together; the
+  tune/test split from E6 (83.6% / 12.6% and 85.0% / 25.3%) is unchanged.
+- **Benchmark: the database looks better, but the rules are the same.** The difference
+  comes from how duplicate rows are scored:
+  - The generator adds 1% duplicate rows (`-DUP`), and `infer.predict()` keeps the first
+    copy in file order.
+  - When that is a manager's `-DUP` copy, the team's lines point at the `-DUP` id.
+    Scoring by id then counts them as wrong, although it is the right person.
+  - In the CSV run, 581 of the 4,727 wrong lines are exactly this. Without them the CSV has
+    4,146 wrong lines, close to the database's 4,169.
+  - The database stores only the original ids (duplicates are skipped on import), so it
+    has no such lines.
+  - The duplicate scenario is therefore not tested in the database; it still is in the
+    CSV pipeline.
+- **Baseline unchanged:** the CSV numbers stay the baseline (95.2% / 62.7%, 4,727 wrong;
+  held-out seed 7 95.4% / 63.7%).
+- **7 people without a line:** in the database they are separate people with identical
+  name, title, department and location as someone else in their company, so
+  `infer.predict()` drops them as duplicates, the same rule as for the CSVs.
+
+Storage and housekeeping:
+- **Size:** 126 MB of the 500 MB free plan after the fixes below (estimated 177 MB before
+  the load).
+- **Cleanup rule in `refresh.py`:** for each company, only the reporting lines of its last
+  2 refreshes are kept. Employment history is never deleted.
+  - Tested on C003 with `scripts/test_cleanup.py`: change a title → refresh (0 deleted),
+    change it back → refresh (115 lines of the oldest run deleted).
+  - The test then undid itself; C003's lines are identical to before.
+- **Lighter trigger (migration 004):** the refresh trigger rewrote the company row for every
+  new job, which grew the 766-row `companies` table to 21 MB during the load. It now
+  updates a company only if it isn't flagged yet. A one-time `VACUUM FULL companies` brought
+  it back to 256 kB, and the database from 146 MB to 126 MB.
