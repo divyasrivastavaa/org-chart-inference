@@ -115,6 +115,7 @@ def main(trigger="refresh"):
               f"{lines:,} reporting lines written ({time.time() - t0:.1f} s, cost $0)")
     else:
         print(f"Run {run_id}: no company needs a refresh; nothing done")
+    return run_id
 
 
 if __name__ == "__main__":

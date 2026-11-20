@@ -41,7 +41,7 @@ create index runs_started_at_idx on runs (started_at desc);
 -- ------------------------------------------------------------------ companies
 create table companies (
     company_id        text primary key,              -- C001 (Benchmark), R01 (ASX/NZX), U01 (UK),
-                                                     -- P-... (PDL), N01 (added in the app)
+                                                     -- P-... (PDL), M001 (added by hand)
     name              text not null,
     industry          text,
     size_band         text,                          -- e.g. '51-200'
@@ -50,7 +50,7 @@ create table companies (
     source            text not null
                       check (source in ('benchmark', 'asx_nzx', 'uk_organogram', 'pdl',
                                         'pdl_history',   -- a past employer in PDL job history
-                                        'app')),
+                                        'manual')),      -- added by hand (db/changes.py)
     source_ref        text,                          -- id in the source (e.g. the PDL company id)
     needs_refresh     boolean not null default true, -- org chart must be re-inferred
     last_refreshed_at timestamptz,
@@ -69,7 +69,7 @@ create table people (
                                                      -- (C001-E0001); PDL: 'P-' + PDL person id
     full_name    text,                               -- may be withheld (UK organograms)
     source       text not null
-                 check (source in ('benchmark', 'asx_nzx', 'uk_organogram', 'pdl', 'app')),
+                 check (source in ('benchmark', 'asx_nzx', 'uk_organogram', 'pdl', 'manual')),
     source_ref   text,                               -- id in the source (e.g. the PDL person id)
     linkedin_url text,
     created_at   timestamptz not null default now(),
@@ -94,12 +94,12 @@ create table employments (
     change_type            text not null default 'initial'
                            check (change_type in (
                                'initial',            -- first load of existing data
-                               'new_person',         -- person added to the database
+                               'new',                -- person added by hand
                                'job_change',         -- moved here from another company
                                'title_change')),     -- new title, same company
                            -- Leaving is not a type: the old row is closed (end_date set).
     previous_employment_id bigint references employments (employment_id),  -- the row it replaced
-    source                 text not null default 'app',
+    source                 text not null default 'manual',
     recorded_at            timestamptz not null default now(),  -- when WE learned about it
     check (end_date is null or start_date is null or end_date >= start_date),
     check (not (is_current and end_date is not null))

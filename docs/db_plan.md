@@ -84,7 +84,7 @@ Key decisions:
   the app, a script or PDL.
 - **IDs stay the same.** Existing IDs are kept (`C001`, `R01`, `U01`, `C001-E0001`), so the
   app and answer key still line up. New PDL rows get a `P-` prefix, and companies created in
-  the app get `N01`, `N02` and so on.
+  by hand get `M001`, `M002` and so on (people: `M-P0001`).
 - **The answer key is its own table.** The inference code never reads it.
 - **Row level security is on for every table.** This blocks Supabase's public web API. The
   app connects with its own login instead.
@@ -246,9 +246,9 @@ one move.
 
 A new **Database** page in the app has these forms:
 
-- **Add a company:** name, industry, size, country (`source = 'app'`).
+- **Add a company:** name, industry, size, country (`source = 'manual'`).
 - **Add a person:** name, title, department, company, start date (`change_type =
-  'new_person'`).
+  'new'`).
 - **Change title:** same company (`title_change`).
 - **Moves to another company:** `job_change`, with the old job closed.
 - **Leaves:** closes the current job.
