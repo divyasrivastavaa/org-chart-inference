@@ -7,6 +7,8 @@ scripts/test_app.py  -  Phase 2: app test. Runs the real app.py without a browse
   - company pages (Benchmark, UK with sources, ASX/NZX, PDL with real names, current job only)
   - Database view: job history, runs & cost, SQL (examples run; writes and set_config
     refused)
+  - Add people / Promote popups: "+ New organisation" first, spelling suggestions (saving is
+    replaced by a stand-in here, so nothing is written)
   - no database -> the "Database not connected" message, no crash
 Read only: nothing is written. No PDL calls.
 Run from the repo root:  python scripts/test_app.py
@@ -20,7 +22,8 @@ from streamlit.testing.v1 import AppTest
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 import infer  # noqa: E402
-from db import connect, display, read as dbread  # noqa: E402
+import title_check  # noqa: E402
+from db import changes, connect, display, read as dbread  # noqa: E402
 
 failures = []
 
@@ -200,6 +203,98 @@ for bad, why in [("delete from runs", "write"),
     next(b for b in at.button if b.label == "Run query").click().run()
     check(bool(at.warning) or bool(at.error), f"refused: {why}")
     sql_box = next(b for b in at.selectbox if b.label == "Example queries")
+
+# ---------------------------------------------------------------- popups, spelling
+print("Add people and Promote popups")
+for typed, want in [("Cheif Data Officer", "Chief Data Officer"), ("Manger", "Manager"),
+                    ("Senior Enginer", "Senior Engineer"), ("Chief Data Officer", None),
+                    ("CEO", None), ("VP, DevOps", None), ("Head of Internal Audit", None)]:
+    check(title_check.suggest(typed) == want, f"spelling: {typed!r} -> {want!r}")
+
+
+def click(at, label):
+    return next(b for b in at.button if b.label == label).click().run()
+
+
+def warned(at):
+    return [w.value for w in at.warning]
+
+
+calls = []
+real_add, real_title = changes.add_person, changes.change_title
+changes.add_person = lambda name, to, title, judge="rules", conn=None: calls.append(
+    (name, to, title)) or {}
+changes.change_title = lambda eid, title, judge="rules", conn=None: calls.append(
+    (eid, title)) or {}
+try:
+    at = new_app()
+    at.run()
+    click(at, "Add people")
+    box = at.selectbox(key="add_to_front")
+    check(box.options[0] == "+ New organisation" and box.value == "+new",
+          "front page: + New organisation is first and the default")
+    check(any(t.label == "Name of the new organisation" for t in at.text_input),
+          "front page: the name box is shown")
+
+    def add_popup(line):
+        a = new_app()
+        a.session_state["company_select"] = "C001"
+        a.run()
+        click(a, "Add people")
+        next(t for t in a.text_area if t.label.startswith("One person")).set_value(line).run()
+        return click(a, "Add and save them")
+
+    at = new_app()
+    at.session_state["company_select"] = "C001"
+    at.run()
+    click(at, "Add people")
+    box = at.selectbox(key="add_to_C001")
+    check(box.options[0] == "+ New organisation" and box.value == "C001",
+          "company page: + New organisation is first, this company is the default")
+    check(not any(t.label == "Name of the new organisation" for t in at.text_input),
+          "company page: no name box until it is chosen")
+    box.set_value("+new").run()
+    check(any(t.label == "Name of the new organisation" for t in at.text_input),
+          "company page: choosing it shows the name box")
+
+    at = add_popup("Spell Test | Cheif Data Officer")
+    check("Did you mean: Chief Data Officer?" in warned(at) and not calls,
+          "Add: warns before saving")
+    click(at, "Use suggestion")
+    check(calls == [("Spell Test", "C001", "Chief Data Officer")], f"Add: suggestion saved {calls}")
+    calls.clear()
+    at = add_popup("Spell Test | Cheif Data Officer")
+    click(at, "Keep as typed")
+    check(calls == [("Spell Test", "C001", "Cheif Data Officer")], f"Add: kept as typed {calls}")
+    calls.clear()
+    at = add_popup("Cheif Manger | Data Engineer")
+    check(not warned(at) and calls == [("Cheif Manger", "C001", "Data Engineer")],
+          "Add: names are not checked")
+    calls.clear()
+
+    def promote(title):
+        a = new_app()
+        a.session_state["company_select"] = "C001"
+        a.run()
+        click(a, "Promote / change title")
+        next(s for s in a.selectbox if s.label == "Who?").set_value("C001-E0003").run()
+        next(t for t in a.text_input if t.label == "New job title").set_value(title).run()
+        return click(a, "Apply change")
+
+    at = promote("Engineering Directr, Platform")
+    check(any("Engineering Director, Platform" in w for w in warned(at)) and not calls,
+          "Promote: warns before saving")
+    click(at, "Use suggestion")
+    check(calls == [("C001-E0003", "Engineering Director, Platform")],
+          f"Promote: suggestion saved {calls}")
+    calls.clear()
+    calls.clear()
+    at = promote("Engineering Directr, Platform")
+    click(at, "Keep as typed")
+    check(not at.exception and not any("Did you mean" in w for w in warned(at)),
+          "Promote: Keep as typed answers the question")
+finally:
+    changes.add_person, changes.change_title = real_add, real_title
 
 # ---------------------------------------------------------------- no database
 print("No database")

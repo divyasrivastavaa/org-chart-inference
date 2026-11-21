@@ -21,6 +21,7 @@ import streamlit as st
 
 import org_chart
 import refresh
+import title_check
 import whatif                    # only its title checks (check_title, in_context)
 from db import changes, read as dbread
 from db.connect import get_connection
@@ -505,13 +506,51 @@ def parse_people(table, text):
 NEW_ORG = "+new"
 
 
+def close_popup(flag, fix_key):
+    ss[flag] = False
+    ss.pop(fix_key, None)
+
+
+def spelling_gate(key, titles, clicked, context=None):
+    """Before saving: if a title looks misspelled, ask. Returns None while waiting for an
+    answer, {} to keep what was typed, or {typed: suggestion} to use the suggestions."""
+    sig = (context, tuple(titles))
+    waiting = ss.get(key)
+    if waiting and waiting["sig"] != sig:       # the text changed: the question is out of date
+        ss.pop(key)
+        waiting = None
+    if not waiting:
+        if not clicked:
+            return None
+        fixes = {t: f for t in dict.fromkeys(titles) if (f := title_check.suggest(t))}
+        if not fixes:
+            return {}
+        waiting = ss[key] = {"sig": sig, "fixes": fixes}
+    fixes = waiting["fixes"]
+    if len(fixes) == 1:
+        st.warning(f"Did you mean: {plain(next(iter(fixes.values())))}?")
+    else:
+        st.warning("Did you mean:\n" + "\n".join(f"- {plain(f)} (typed: {plain(t)})"
+                                                  for t, f in fixes.items()))
+    use, keep = st.columns(2)
+    if use.button("Use suggestion" if len(fixes) == 1 else "Use suggestions", type="primary",
+                  key=f"{key}_use", width="stretch"):
+        ss.pop(key)
+        return fixes
+    if keep.button("Keep as typed", key=f"{key}_keep", width="stretch"):
+        ss.pop(key)
+        return {}
+    return None
+
+
 # The popups stay open (ss.adding / ss.removing) until they finish or are closed with X
-@st.dialog("Add people", width="large", on_dismiss=lambda: set_flag("adding", False))
+@st.dialog("Add people", width="large", on_dismiss=lambda: close_popup("adding", "add_fix"))
 def add_people_dialog():
-    options = list(company_label) + [NEW_ORG]
-    current = ss.company_select if ss.company_select in company_label else options[0]
-    to = st.selectbox("Company", options, index=options.index(current), key="add_to",
-                      format_func=lambda c: "+ Create a new organisation" if c == NEW_ORG
+    options = [NEW_ORG] + list(company_label)
+    current = ss.company_select if ss.company_select in company_label else NEW_ORG
+    to = st.selectbox("Company", options, index=options.index(current),
+                      key=f"add_to_{ss.company_select or 'front'}",   # default follows the page
+                      format_func=lambda c: "+ New organisation" if c == NEW_ORG
                       else company_label[c])
     org_name = st.text_input("Name of the new organisation") if to == NEW_ORG else ""
     one, paste = st.tabs(["One by one", "Paste a list"])
@@ -527,7 +566,8 @@ def add_people_dialog():
                "marked \"manual\". They are placed at the next refresh (\"Refresh changed "
                "companies\" in the sidebar). They have no answer key, so they never count in "
                "precision.")
-    if not st.button("Add and save them", type="primary"):
+    clicked = st.button("Add and save them", type="primary")
+    if not clicked and not ss.get("add_fix"):
         return
     people = parse_people(table, text)
     taken = set() if to == NEW_ORG else db(dbread.names_in, to)
@@ -546,6 +586,10 @@ def add_people_dialog():
                                                       | {n for n in names
                                                          if names.count(n) > 1})))
     else:
+        fixes = spelling_gate("add_fix", [d for _, d in people], clicked, (to, org_name))
+        if fixes is None:
+            return
+        people = [(n, fixes.get(d, d)) for n, d in people]
         try:
             with get_connection() as conn:            # one transaction: all saved, or none
                 to_id = (changes.add_company(org_name.strip(), conn=conn)["company_id"]
@@ -600,7 +644,7 @@ def remove_people_dialog(cid, co):
 
 
 @st.dialog("Promote / change title", width="large",
-           on_dismiss=lambda: set_flag("changing", False))
+           on_dismiss=lambda: close_popup("changing", "title_fix"))
 def change_title_dialog(cid, co):
     label = dict(zip(co.employee_id, co.full_name + " — " + co.title.fillna("(no title)")))
     eid = st.selectbox("Who?", list(label), format_func=label.get, index=None,
@@ -609,8 +653,16 @@ def change_title_dialog(cid, co):
     st.caption("Saved in the database: their current job is closed and a new one opened with "
                "the new title (both kept in their job history). They and their team are "
                "placed again at the next refresh. Never counted in precision.")
-    if not st.button("Apply change", type="primary", disabled=not eid or not new_title.strip()):
+    clicked = st.button("Apply change", type="primary",
+                        disabled=not eid or not new_title.strip())
+    typed = new_title.strip()
+    if not eid or not typed or (not clicked and not ss.get("title_fix")):
+        ss.pop("title_fix", None)
         return
+    fixes = spelling_gate("title_fix", [typed], clicked, eid)
+    if fixes is None:
+        return
+    new_title = fixes.get(typed, typed)
     problem = whatif.check_title(co, eid, new_title)
     if problem:
         st.warning(plain(problem))
