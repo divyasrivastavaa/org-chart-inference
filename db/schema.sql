@@ -154,6 +154,7 @@ create unique index reporting_lines_one_current_idx
 create index reporting_lines_manager_current_idx
     on reporting_lines (manager_id) where is_current;     -- "who reports to X?"
 create index reporting_lines_run_idx on reporting_lines (run_id);
+create index reporting_lines_company_run_idx on reporting_lines (company_id, run_id);
 
 -- ------------------------------------------------------------------ answer_key
 -- True managers, only for measuring precision / coverage. Never read by the inference code.

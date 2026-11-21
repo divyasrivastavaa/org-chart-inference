@@ -76,22 +76,26 @@ def flash(kind, text):
 
 
 def saved():
-    """After any write: forget cached reads so every page shows the database as it is."""
-    st.cache_data.clear()
+    """After any write. Company and front-page caches need nothing: their key (the versions
+    in dbread.page_state) has changed. Only these two have no version."""
+    db_runs.clear()
+    db_accuracy.clear()
 
 
-@st.cache_data(ttl=TTL, show_spinner=False)
-def db_companies():
+# Cached by version (dbread.page_state): reused until the data really changes. max_entries
+# keeps memory small on the free hosting plan.
+@st.cache_data(max_entries=8, show_spinner=False)
+def db_companies(version):
     return dbread.companies()
 
 
-@st.cache_data(ttl=TTL, show_spinner=False)
-def db_stats(threshold):
+@st.cache_data(max_entries=24, show_spinner=False)
+def db_stats(threshold, version):
     return dbread.company_stats(threshold)
 
 
-@st.cache_data(ttl=TTL, show_spinner=False)
-def db_counts():
+@st.cache_data(max_entries=8, show_spinner=False)
+def db_counts(version):
     return dbread.counts()
 
 
@@ -100,9 +104,35 @@ def db_accuracy(threshold, company_ids):
     return dbread.accuracy(threshold, list(company_ids))
 
 
-@st.cache_data(ttl=TTL, show_spinner=False)
-def db_company(company_id, show_pdl):
+@st.cache_data(max_entries=40, show_spinner=False)
+def db_company(company_id, version, show_pdl):
     return dbread.company(company_id, show_pdl)
+
+
+@st.cache_data(max_entries=40, show_spinner=False)
+def db_pending(company_id, version):
+    return dbread.pending_changes(company_id)
+
+
+@st.cache_data(max_entries=40, show_spinner=False)
+def db_history(company_id, version):
+    return dbread.last_two_refreshes(company_id)
+
+
+@st.cache_data(max_entries=40, show_spinner=False)
+def company_context(company_id, version, _people):
+    return whatif.in_context(_people)
+
+
+# The built pages. show_pdl is in the key, so masked and real names are never mixed up.
+@st.cache_data(max_entries=60, show_spinner=False)
+def chart_html(company_id, version, show_pdl, threshold, show_truth, func, pick, _view):
+    return org_chart.render_html(_view, show_truth, pick)
+
+
+@st.cache_data(max_entries=40, show_spinner=False)
+def levels_html(company_id, version, show_pdl, threshold, _people):
+    return org_chart.render_levels(_people, LEVELS)
 
 
 @st.cache_data(ttl=TTL, show_spinner=False)
@@ -186,15 +216,18 @@ ss.setdefault("edit_ok", False)
 
 # ---------------------------------------------------------------- all datasets
 # Company IDs never clash (C001, R01, U01, P-...), so one table holds all of them.
+wanted = ss.get("open_next") or ss.get("company_select") or st.query_params.get("company", "")
 try:
-    companies = db_companies()
+    STATE = dbread.page_state(wanted)             # what changed? (one small query per page)
+    FRONT_V = STATE["front"]
+    companies = db_companies(FRONT_V)
 except (psycopg.Error, RuntimeError):            # no secrets, wrong password, paused project
     st.title("Org Chart Inference")
     st.error(NOT_CONNECTED)
     st.stop()
 companies = (companies[["company_id", "company_name", "industry", "dataset", "employees"]]
              .sort_values("company_name").reset_index(drop=True))
-COUNTS = db(db_counts)
+COUNTS = db(db_counts, FRONT_V)
 company_label = dict(zip(companies.company_id,
                          companies.company_name + " (" + companies.company_id + ")"))
 dataset_of = dict(zip(companies.company_id, companies.dataset))
@@ -620,7 +653,7 @@ def check_pin():
     ss.pin_input = ""                           # never keep the PIN in the page
 
 
-waiting = db(dbread.waiting_companies)
+waiting = STATE["waiting"]
 st.sidebar.button("Refresh changed companies", icon=":material/sync:", width="stretch",
                   on_click=refresh_now, disabled=not can_edit(),
                   help="Re-infers only the companies with saved changes and logs the run."
@@ -669,6 +702,9 @@ if st.sidebar.button("Docs: how it works", icon=":material/account_tree:", width
 if ss.get("adding") and can_edit():
     add_people_dialog()
 cid = ss.company_select
+if cid and cid != STATE["company_id"]:
+    STATE = db(dbread.page_state, cid)
+COMPANY_V = STATE["company"]
 if cid:
     st.query_params["company"] = cid
 else:
@@ -701,7 +737,7 @@ if not cid:
     answer_key = "the answer key of each dataset"
     shown = companies
     # Per company from the database: lines drawn, people scored, given a line, right
-    table = shown.merge(db(db_stats, threshold), on="company_id", how="left")
+    table = shown.merge(db(db_stats, threshold, FRONT_V), on="company_id", how="left")
     n_scored, n_given, n_right = (int(table[c].fillna(0).sum())
                                   for c in ("scored", "given", "right"))
     coverage = n_given / n_scored if n_scored else None
@@ -747,7 +783,7 @@ if not cid:
 # ================================================================ company page
 # This company from the database: the current lines (last refresh), plus people saved since
 # then (waiting for a refresh), scored rows and the answer key. Nothing is kept in memory.
-df, scored, truth_small = db(db_company, cid, show_pdl_names())
+df, scored, truth_small = db(db_company, cid, COMPANY_V, show_pdl_names())
 co = apply_threshold(df, threshold)
 # A manager who left or moved since the last refresh is no longer on this chart: their team
 # shows as not placed until the next refresh
@@ -757,7 +793,7 @@ co["given"] = co.manager_id.notna()
 co["right"] = co.given & (co.manager_id == co.true_manager_id)
 co["judge"] = co.judge.map({"gemini": "Gemini"})   # the chart marks "placed by Gemini"
 left_ids, interim_ids, vacant_ids, not_here = set(), set(), set(), set()   # what-if only
-pending = db(dbread.pending_changes, cid)        # saved, not refreshed yet (not cached)
+pending = db(db_pending, cid, COMPANY_V)         # saved, not refreshed yet
 functions = ["All"] + sorted(co.function.dropna().unique().tolist())
 func = domain_slot.selectbox("Domain", functions,
                              help="Show one function (Engineering, Sales …) under the CEO")
@@ -819,7 +855,7 @@ names_by_id = dict(zip(co.employee_id, co.full_name))
 names_by_id.update({v: "Vacant · " + str(co.title[co.employee_id == v].iloc[0])
                     for v in vacant_ids})          # a vacant seat, named by its title
 # Level and department as the rules read them (title + company context)
-ctx = whatif.in_context(co[~co.employee_id.isin(not_here)])
+ctx = company_context(cid, COMPANY_V, co[~co.employee_id.isin(not_here)])
 co["level_now"] = co.employee_id.map(ctx.level).fillna(co.level)
 co["dept_now"] = co.employee_id.map(ctx.function).fillna(co.function)
 
@@ -895,8 +931,9 @@ with tab_chart:
         h1.caption(f"Highlighted: **{names_by_id[pick]}** (picked in the People tab)")
         h2.button("Clear highlight", on_click=set_flag, args=("highlight", None))
     # Our own HTML: names and titles are escaped inside org_chart.py before display
-    st.iframe(org_chart.render_html(view, show_truth, pick), height=720)
-    last = db(changes.last_change)                # newest saved change (any company)
+    st.iframe(chart_html(cid, COMPANY_V, show_pdl_names(), threshold, show_truth, func, pick,
+                         view), height=720)
+    last = STATE["last"]                          # newest saved change (any company)
     u1, u2 = st.columns([1.2, 4])
     u1.button("Undo last change", icon=":material/undo:", on_click=undo_last_change,
               disabled=not (edit and last),
@@ -919,7 +956,7 @@ def counts(frame, gone=frozenset(), interim=frozenset(), vacant=frozenset()):
 with tab_reports:
     now = co[~co.employee_id.isin(not_here)]
     st.markdown("**People by level**")
-    st.html(org_chart.render_levels(now, LEVELS))
+    st.html(levels_html(cid, COMPANY_V, show_pdl_names(), threshold, now))
     st.markdown("**People by department**")
     per_dept = now.dept_now.fillna("unknown").value_counts()
     st.bar_chart(per_dept.rename_axis("Department").reset_index(name="People"),
@@ -952,7 +989,7 @@ with tab_reports:
                   help=f"{who.capitalize()}; changes you made here are never counted")
 
     # ------------------------------------------------ Before vs Now (last two refreshes)
-    hist = db(dbread.last_two_refreshes, cid)
+    hist = db(db_history, cid, COMPANY_V)
     run_ids = sorted(hist.run_id.unique())
     if len(run_ids) == 2:
         before = apply_threshold(hist[hist.run_id == run_ids[0]], threshold)

@@ -14,8 +14,10 @@ Privacy: people with source 'pdl' are real people. Unless show_pdl is True (the 
 entered DB_VIEW_PIN) their name is replaced by "PDL person #<id>".
 """
 import re
+import threading
 
 import pandas as pd
+import psycopg
 
 import infer
 from db import connect
@@ -32,11 +34,88 @@ PDL_DEPARTMENTS = {"engineering": "Engineering", "sales": "Sales",
                    "support": "Customer Success"}
 
 
+# One read-only connection per server, reused: opening a new one costs several trips to the
+# database, which is the slowest part of a page when the app and database are far apart.
+_lock = threading.Lock()
+_conn = None
+_made_by = None
+
+
+def _drop_reader():
+    global _conn
+    if _conn is not None:
+        try:
+            _conn.close()
+        except psycopg.Error:
+            pass
+    _conn = None
+
+
+def _reader():
+    global _conn, _made_by
+    if _conn is None or _conn.closed or _made_by is not connect.get_connection:
+        _drop_reader()
+        _conn = connect.get_connection(autocommit=True, prepare_threshold=None)
+        _conn.execute("set default_transaction_read_only = on")
+        _made_by = connect.get_connection
+    return _conn
+
+
+def read_many(statements):
+    """Runs [(sql, params), ...] and returns one frame each. They are sent together (one
+    trip to the database). If the kept connection was dropped, reconnects and tries once more."""
+    with _lock:
+        for attempt in (1, 2):
+            try:
+                conn = _reader()
+                if psycopg.Pipeline.is_supported():
+                    with conn.pipeline():
+                        cursors = [conn.execute(q, p) for q, p in statements]
+                else:
+                    cursors = [conn.execute(q, p) for q, p in statements]
+                return [pd.DataFrame(c.fetchall(), columns=[d.name for d in c.description])
+                        for c in cursors]
+            except psycopg.Error as e:
+                _drop_reader()
+                if attempt == 2 or not isinstance(e, psycopg.OperationalError):
+                    raise
+
+
 def query(sql, params=None):
-    with connect.get_connection() as conn:
-        conn.read_only = True
-        cur = conn.execute(sql, params)
-        return pd.DataFrame(cur.fetchall(), columns=[d.name for d in cur.description])
+    return read_many([(sql, params)])[0]
+
+
+def page_state(company_id):
+    """One small query per page: what changed? The versions are the cache keys, so cached
+    data is reused until that company (or, for the front page, any company) changes.
+    A saved change counts too: it changes the page before the next refresh."""
+    r = query("""
+        select (select coalesce(max(last_run_id), 0) from companies) as run_id,
+               (select coalesce(max(change_id), 0) from change_log) as change_id,
+               (select count(undone_at) from change_log) as undone,
+               (select count(*) from companies c where c.needs_refresh and exists
+                   (select 1 from employments e where e.company_id = c.company_id
+                    and e.is_current)) as waiting,
+               l.change_id as last_id, l.summary as last_summary,
+               (select last_run_id from companies where company_id = %(c)s) as company_run,
+               (select needs_refresh from companies where company_id = %(c)s) as needs,
+               (select coalesce(max(change_id), 0) from change_log
+                where %(c)s = any(company_ids)) as company_change,
+               (select count(undone_at) from change_log
+                where %(c)s = any(company_ids)) as company_undone
+        from (select 1) as one
+        left join lateral (select change_id, summary from change_log where undone_at is null
+                           order by change_id desc limit 1) l on true""",
+              {"c": company_id}).iloc[0]
+
+    def number(x):
+        return None if pd.isna(x) else int(x)
+
+    return {"company_id": company_id, "waiting": int(r.waiting),
+            "front": (int(r.run_id), int(r.change_id), int(r.undone), int(r.waiting)),
+            "company": (number(r.company_run), None if pd.isna(r.needs) else bool(r.needs),
+                        int(r.company_change), int(r.company_undone)),
+            "last": {"summary": r.last_summary} if pd.notna(r.last_id) else None}
 
 
 def mask(frame, show_pdl, name_col="full_name", id_col="employee_id", source_col="person_source"):
@@ -150,11 +229,38 @@ def _departments(df):
 
 
 def company(company_id, show_pdl):
-    """(chart frame, scored frame, truth frame) for one company.
+    """(chart frame, scored frame, truth frame) for one company: one query per table, sent
+    together, only the columns the page uses.
     chart: everyone on the chart, with the current line from the last refresh.
     scored: people with a known true manager (also those without a line), as evaluate.py.
     truth: employee_id, true_manager_id, checkable (can a drawn line be coloured?)."""
-    df = _departments(query(PEOPLE_SQL, ([company_id],)))
+    info, jobs, who, lines, key = read_many([
+        ("select name as company_name, industry, size_band as size, source as company_source, "
+         "last_refreshed_at, needs_refresh from companies where company_id = %s", (company_id,)),
+        ("select person_id as employee_id, title, department, location, recorded_at "
+         "from employments where company_id = %s and is_current order by person_id",
+         (company_id,)),
+        ("select p.person_id as employee_id, p.full_name, p.source as person_source "
+         "from employments e join people p using (person_id) "
+         "where e.company_id = %s and e.is_current", (company_id,)),
+        ("select person_id as employee_id, line_id, proposed_manager_id as pred_manager_id, "
+         "confidence, reason, judge from reporting_lines "
+         "where company_id = %s and is_current", (company_id,)),
+        ("select person_id as employee_id, true_manager_id from answer_key "
+         "where company_id = %s", (company_id,))])
+    co = info.iloc[0]
+    df = jobs.merge(who, on="employee_id", how="left").merge(lines, on="employee_id", how="left") \
+        .merge(key, on="employee_id", how="left")
+    for col in ("pred_manager_id", "reason", "judge", "true_manager_id"):
+        df[col] = df[col].astype(object).where(df[col].notna(), None)
+    for col in ("company_name", "industry", "size", "company_source"):
+        df[col] = co[col]
+    df["company_id"] = company_id
+    # Saved after the company's last refresh, or the company has saved changes (e.g. an undo
+    # reopened an old job): not placed yet
+    df["pending"] = True if pd.isna(co.last_refreshed_at) or co.needs_refresh \
+        else df.recorded_at > co.last_refreshed_at
+    df = _departments(df.drop(columns="recorded_at"))
     df = mask(df, show_pdl)
     # Can a drawn line be checked? Benchmark: everyone. Real data: only a known manager.
     df["checkable"] = (df.company_source == "benchmark") | df.true_manager_id.notna()
