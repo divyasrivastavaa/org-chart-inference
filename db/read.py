@@ -10,6 +10,8 @@ the same:
   true_manager_id, checkable
 level / function are read from the title (infer.parse_title), as predictions.csv had them.
 
+PDL text is stored in lowercase, as PDL sent it; db/display.py puts it in proper case here,
+when it is read for the page.
 Privacy: people with source 'pdl' are real people. The app shows their name and current job
 only: job_history() and the SQL tab's role (migration 008) never return their past jobs.
 """
@@ -20,7 +22,7 @@ import pandas as pd
 import psycopg
 
 import infer
-from db import connect
+from db import connect, display
 
 # Dataset keys used by the app -> companies.source in the database
 SOURCE_OF = {"synthetic": "benchmark", "real": "asx_nzx", "uk": "uk_organogram", "pdl": "pdl",
@@ -124,7 +126,7 @@ def companies():
     'employees' counts the people on the company's chart (people the inference dropped
     as exact duplicates have no line and are left out, as with the CSVs)."""
     df = query("""
-        select c.company_id, c.name as company_name, c.industry, c.source,
+        select c.company_id, c.name as company_name, c.industry, c.source, c.source_ref,
                c.size_band as size, count(*) as total, count(rl.line_id) as with_line
         from companies c
         join employments e on e.company_id = c.company_id and e.is_current
@@ -132,6 +134,9 @@ def companies():
                                     and rl.company_id = c.company_id and rl.is_current
         where c.source = any(%s)
         group by c.company_id""", (list(SOURCE_OF.values()),))
+    pdl = df.source == "pdl"
+    df["company_name"] = display.apply(df.company_name, pdl, display.proper_title)
+    df["industry"] = display.apply(df.industry, pdl, display.proper_title)
     df["dataset"] = df.source.map(DATASET_OF_SOURCE)
     df["employees"] = df.with_line.where(df.with_line > 0, df.total).astype(int)
     return df.drop(columns=["total", "with_line"])
@@ -271,6 +276,12 @@ def company(company_id):
     df["function"] = [p[1] for p in parsed]
     scored["confidence"] = scored.confidence.astype(float)
     truth = df[["employee_id", "true_manager_id", "checkable"]]
+    # Shown in proper case (level and function above were read from the original text)
+    who_pdl, co_pdl = df.person_source == "pdl", df.company_source == "pdl"
+    df = df.assign(full_name=display.apply(df.full_name, who_pdl, display.proper_name),
+                   title=display.apply(df.title, who_pdl, display.proper_title),
+                   company_name=display.apply(df.company_name, co_pdl, display.proper_title),
+                   industry=display.apply(df.industry, co_pdl, display.proper_title))
     chart = df.drop(columns=["line_id", "company_source"])
     return chart.reset_index(drop=True), scored.reset_index(drop=True), truth
 
@@ -334,9 +345,9 @@ def companies_named(names, source):
 
 def names_in(company_id):
     """Names of the people working there now."""
-    df = query("select p.full_name from employments e join people p using (person_id) "
+    df = query("select p.full_name, p.source from employments e join people p using (person_id) "
                "where e.company_id = %s and e.is_current", (company_id,))
-    return set(df.full_name)
+    return set(display.apply(df.full_name, df.source == "pdl", display.proper_name))
 
 
 def sources():
@@ -349,28 +360,33 @@ def sources():
 def find_people(text, limit=50):
     """People whose name or id contains text."""
     like = f"%{text.strip()}%"
-    return query("""
+    df = query("""
         select p.person_id as employee_id, p.full_name, p.source as person_source
         from people p
         where p.person_id ilike %s or p.full_name ilike %s
         order by p.person_id limit %s""", (like, like, limit))
+    df["full_name"] = display.apply(df.full_name, df.person_source == "pdl", display.proper_name)
+    return df
 
 
 def job_history(person_id):
     """Every job of a person, oldest first. PDL people (real people): current job only, and
     nothing that points to an earlier one."""
-    return query("""
+    df = query("""
         select e.employment_id, e.company_id, c.name as company, e.title, e.department,
                e.seniority, e.start_date, e.end_date, e.is_current,
                case when p.source = 'pdl' then null else e.change_type end as change_type,
                case when p.source = 'pdl' then null else e.previous_employment_id end
                    as previous_employment_id,
-               e.source
+               e.source, p.source as person_source, c.source as company_source
         from employments e
         join companies c using (company_id)
         join people p using (person_id)
         where e.person_id = %s and (e.is_current or p.source <> 'pdl')
         order by e.start_date nulls first, e.employment_id""", (person_id,))
+    df["title"] = display.apply(df.title, df.person_source == "pdl", display.proper_title)
+    df["company"] = display.apply(df.company, df.company_source == "pdl", display.proper_title)
+    return df.drop(columns=["person_source", "company_source"])
 
 
 def demo_changes():

@@ -171,7 +171,7 @@ ss = st.session_state
 ss.setdefault("table_version", 0)
 
 # ---------------------------------------------------------------- all datasets
-# Company IDs never clash (C001, R01, U01, P-...), so one table holds all of them.
+# Company IDs never clash (C001, R01, U01, P01), so one table holds all of them.
 wanted = ss.get("open_next") or ss.get("company_select") or st.query_params.get("company", "")
 try:
     STATE = dbread.page_state(wanted)             # what changed? (one small query per page)
@@ -181,6 +181,10 @@ except (psycopg.Error, RuntimeError):            # no secrets, wrong password, p
     st.title("Org Chart Inference")
     st.error(NOT_CONNECTED)
     st.stop()
+# Links saved before PDL companies got short ids (?company=P-<PDL id>) still open them
+OLD_PDL_LINKS = {f"P-{ref}": c for c, ref, src in zip(companies.company_id, companies.source_ref,
+                                                      companies.source)
+                 if src == "pdl" and isinstance(ref, str)}
 companies = (companies[["company_id", "company_name", "industry", "dataset", "employees"]]
              .sort_values("company_name").reset_index(drop=True))
 COUNTS = db(db_counts, FRONT_V)
@@ -196,6 +200,7 @@ st.query_params.pop("data", None)  # old links (?data=real&company=R01) still op
 # Table clicks and the Back button write to it; the URL (?company=C001) mirrors it.
 if ss.get("company_select") not in [""] + list(company_label):
     from_url = st.query_params.get("company", "")
+    from_url = OLD_PDL_LINKS.get(from_url, from_url)
     ss.company_select = from_url if from_url in company_label else ""
 if ss.get("open_next"):            # set by the "Add people" window: open that company
     ss.company_select = ss.pop("open_next")

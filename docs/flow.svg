@@ -52,7 +52,7 @@
   <rect class="box blue" x="749" y="84" width="231" height="108" rx="8"/>
   <text class="b" x="763" y="108">People Data Labs</text>
   <text class="m" x="763" y="126">scripts/pdl_load.py (cached)</text>
-  <text class="t" x="763" y="146">50 senior people at 1 company,</text>
+  <text class="t" x="763" y="146">53 senior people at 1 company,</text>
   <text class="t" x="763" y="162">with their job history</text>
   <text class="t" x="763" y="178">the app shows current job only</text>
 

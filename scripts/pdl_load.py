@@ -9,7 +9,8 @@ the budget or more than the credits left (from the last saved response headers).
 
 Loads:
   companies    Atlassian (source 'pdl', needs_refresh = true) + every past employer in
-               their job history (source 'pdl_history', needs_refresh = false)
+               their job history (source 'pdl_history', needs_refresh = false). Short ids
+               (P01, P02 ...); the PDL id is kept in source_ref.
   people       one row each (source 'pdl'); person_id = 'P-' + PDL id
   employments  every job in their experience, oldest first: 'initial' for the earliest,
                'job_change' when the company changes, 'title_change' when only the title
@@ -82,6 +83,21 @@ def company_row(c, source):
             c.get("website"), source, ref)
 
 
+def short_id(conn, row):
+    """The company's short id (P01 ...): the one it already has (found by PDL id, or by name
+    when PDL gave no id), or the next free one."""
+    ref, name = row[7], row[1]
+    found = conn.execute(
+        "select company_id from companies where source in ('pdl', 'pdl_history') and "
+        + ("source_ref = %s" if ref else "source_ref is null and lower(name) = lower(%s)"),
+        (ref or name,)).fetchone()
+    if found:
+        return found[0]
+    n = conn.execute("select coalesce(max(substring(company_id from '^P([0-9]+)$')::int), 0) "
+                     "from companies").fetchone()[0]
+    return f"P{n + 1:02d}"
+
+
 def jobs_of(p):
     """The person's jobs, oldest first, current job last. Only the fields we need."""
     jobs = []
@@ -113,8 +129,10 @@ def table_counts(conn):
             for t in ["companies", "people", "employments"]}
 
 
-def main():
-    saved = get_response()
+def main(saved=None, keep=None):
+    """saved: an already fetched response (default: this script's request, or its cache).
+    keep: optional filter, list of PDL people -> the ones to load."""
+    saved = saved or get_response()
     print(f"HTTP status: {saved['status']}")
     h = saved["headers"]
     if saved["status"] != 200:
@@ -123,6 +141,8 @@ def main():
     print(f"People returned: {len(people)} (total matches: {saved['response'].get('total')})")
     print(f"Credits spent by this request: {h.get('x-call-credits-spent', '?')}, "
           f"credits left after it: {h.get('x-totallimit-remaining', '?')}\n")
+    if keep:
+        people = keep(people)
 
     found, skipped_people, repeats = Counter(), 0, 0
     with get_connection() as conn:               # one transaction: all or nothing
@@ -136,9 +156,10 @@ def main():
             jobs = jobs_of(p)
             current_ids = {company_row(j["company"], "pdl")[0] for j in jobs if j["current"]}
             for j in jobs:
-                j["company_id"] = company_row(j["company"], "")[0]
-                current = j["company_id"] in current_ids   # also for an earlier stint there
+                key = company_row(j["company"], "")[0]
+                current = key in current_ids               # also for an earlier stint there
                 row = company_row(j["company"], "pdl" if current else "pdl_history")
+                j["company_id"] = short_id(conn, row)
                 # A past employer that turns out to be someone's current company becomes 'pdl'
                 conn.execute(
                     "insert into companies (company_id, name, industry, size_band, country, "
@@ -146,7 +167,7 @@ def main():
                     "values (%s, %s, %s, %s, %s, %s, %s, %s, %s) "
                     "on conflict (company_id) do update set source = 'pdl' "
                     "where excluded.source = 'pdl' and companies.source = 'pdl_history'",
-                    (*row, current))
+                    (j["company_id"], *row[1:], current))
             conn.execute("insert into people (person_id, full_name, source, source_ref) "
                          "values (%s, %s, 'pdl', %s)", (pid, p.get("full_name"), p["id"]))
             prev = None

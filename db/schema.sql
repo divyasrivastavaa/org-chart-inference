@@ -44,7 +44,7 @@ create unique index runs_pdl_import_note_idx on runs (note) where trigger = 'pdl
 -- ------------------------------------------------------------------ companies
 create table companies (
     company_id        text primary key,              -- C001 (Benchmark), R01 (ASX/NZX), U01 (UK),
-                                                     -- P-... (PDL), M001 (added by hand)
+                                                     -- P01 (PDL), M001 (added by hand)
     name              text not null,
     industry          text,
     size_band         text,                          -- e.g. '51-200'

@@ -19,7 +19,8 @@ from streamlit.testing.v1 import AppTest
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
-from db import connect, read as dbread  # noqa: E402
+import infer  # noqa: E402
+from db import connect, display, read as dbread  # noqa: E402
 
 failures = []
 
@@ -72,7 +73,7 @@ for key, (prec, cov) in expected.items():
     check(got == (prec, cov), f"{key}: precision {got[0]} (expected {prec}), "
                               f"coverage {got[1]} (expected {cov})")
 pdl = everyone[everyone.dataset == "pdl"]
-check(int(pdl.employees.sum()) == 50, "pdl: 50 people")
+check(int(pdl.employees.sum()) == 53, "pdl: 53 people (50 + 3 leaders)")
 
 # ---------------------------------------------------------------- company pages
 print("Company pages")
@@ -92,6 +93,31 @@ for cid, what in [("C001", "Benchmark"), ("U01", "UK"), ("R01", "ASX/NZX"),
     check(people is not None and len(people) > 0, f"{what}: People tab has rows")
     if what == "PDL":
         check(not people.Name.str.startswith("PDL person #").any(), "PDL: real names shown")
+        check(cid == "P01", "PDL: Atlassian has the short id P01")
+        check("Mike Cannon-Brookes" in set(people.Name), "PDL: name in proper case")
+        check("Chief People and AI Enablement Officer" in set(people.Title),
+              "PDL: title in proper case (short words lower, AI upper)")
+        check(any(h.value == "Atlassian — All" for h in at.subheader), "PDL: company name in "
+              "proper case")
+        raw = dbread.query("select e.title, e.department from employments e "
+                           "where e.company_id = 'P01' and e.is_current")
+        check(raw.title.str.fullmatch(r"[^A-Z]*").all(), "PDL: database text is unchanged")
+        check(all(infer.parse_title(t, d) == infer.parse_title(display.proper_title(t), d)
+                  for t, d in zip(raw.title, raw.department)),
+              "PDL: the rules read the shown title the same way")
+        ref = dbread.query("select source_ref from companies where company_id = 'P01'"
+                           ).source_ref[0]
+        check(ref == "Jav0LdTpq88xDlVrf56yGwEiRghj", "PDL: the PDL id is kept in source_ref")
+        for url, label in (("P01", "short link"), (f"P-{ref}", "old long link")):
+            link = new_app()
+            link.query_params["company"] = url
+            link.run()
+            check(not link.exception and link.session_state["company_select"] == "P01",
+                  f"PDL: ?company= {label} opens Atlassian")
+        hist = dbread.job_history(dbread.find_people("mike cannon").employee_id[0])
+        check(hist.company.tolist() == ["Atlassian"]
+              and hist.title.tolist() == ["Chief Executive Officer and Co-Founder"],
+              "PDL: Job history in proper case, current job only")
         pids = dbread.query("select person_id from people where source = 'pdl'").person_id
         jobs = [dbread.job_history(p) for p in pids]
         check(all(len(j) == 1 and j.is_current.all() and j.change_type.isna().all()
@@ -100,13 +126,13 @@ for cid, what in [("C001", "Benchmark"), ("U01", "UK"), ("R01", "ASX/NZX"),
         n = dbread.run_readonly("select count(*) filter (where is_current) as now, "
                                 "count(*) filter (where not is_current) as past "
                                 "from employments where person_id like 'P-%'").iloc[0]
-        check(int(n.now) == 50 and int(n.past) == 0, "PDL: SQL tab sees 50 current jobs, 0 past")
+        check(int(n.now) == 53 and int(n.past) == 0, "PDL: SQL tab sees 53 current jobs, 0 past")
         n = dbread.run_readonly("select count(*) as n from companies "
                                 "where source = 'pdl_history'").n[0]
         check(int(n) == 0, "PDL: SQL tab can't list their past employers")
         n = dbread.run_readonly("select count(*) as n from people where source = 'pdl' "
                                 "and full_name is not null and full_name <> ''").n[0]
-        check(int(n) == 50, "PDL: SQL tab shows their names")
+        check(int(n) == 53, "PDL: SQL tab shows their names")
     if what == "UK":
         check(any("Organogram file on data.gov.uk" in md.value for md in at.markdown),
               "UK: sources listed under the chart (from the database)")

@@ -24,6 +24,7 @@ Each function opens its own connection and commits, or joins a transaction when 
 """
 from contextlib import contextmanager
 
+from db import display
 from db.connect import get_connection
 
 
@@ -131,8 +132,10 @@ def change_title(person_id, new_title, judge="rules", conn=None):
         _mark(c, job["company_id"])
         done = {"person_id": person_id, "opened": [opened], "closed": [job["employment_id"]],
                 "companies": [job["company_id"]]}
+        old_title = (display.proper_title(job["title"]) if person_id.startswith("P-")
+                     else job["title"])
         _log(c, "change_title", done, judge,
-             f"{person_id}: {job['title']} → {new_title.strip()}")
+             f"{person_id}: {old_title} → {new_title.strip()}")
     return done
 
 

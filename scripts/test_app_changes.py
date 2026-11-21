@@ -264,6 +264,15 @@ try:
         lines1 = {(r[0], r[1], float(r[2]) if r[2] is not None else None)
                   for r in c.execute(lines_sql, ([A, B],)).fetchall()}
         check(lines1 == lines0, f"after the refresh, {A}, {B} have the same lines as before")
+        # A refresh of the PDL company under its short id (also rolled back)
+        before = {r[0:2] for r in c.execute(lines_sql, (["P01"],)).fetchall()}
+        cur = c.execute(refresh.CURRENT_EMPLOYEES, (["P01"],))
+        frame = pd.DataFrame(cur.fetchall(), columns=[d.name for d in cur.description])
+        frame["department"] = frame.department.map(refresh.PDL_DEPARTMENTS)
+        n = refresh.refresh_company(c, run, "P01", frame)
+        after = {r[0:2] for r in c.execute(lines_sql, (["P01"],)).fetchall()}
+        check(after == before and n["lines_drawn"] == 7,
+              f"P01 refreshes under its short id: {n['lines_drawn']} lines, same as before")
 
 finally:
     # ------------------------------------------------------------ 9. back to the start
