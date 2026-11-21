@@ -101,8 +101,9 @@ CSV files are used once, to import the source data (`scripts/load_db.py`).
   - **Terms:** the person data is used under PDL's terms. PDL's separate free company
     dataset is [CC BY 4.0](https://docs.peopledatalabs.com/docs/free-company-dataset) but
     isn't used here.
-  - **Privacy:** they are real people, so the app shows their names only with the view
-    PIN.
+  - **Privacy:** they are real people, so the app shows only their name and current job.
+    Their past jobs stay in the database and are hidden from the Job history tab and the
+    SQL tab.
 
 ## Changes and refresh
 
@@ -114,6 +115,10 @@ CSV files are used once, to import the source data (`scripts/load_db.py`).
   their new lines. Everything else stays as it is. Example: one move between two companies
   refreshes 2 of 533 companies in about 2 seconds.
 - **Undo last change** reverses the newest saved change and marks its companies for refresh.
+- **Reset demo data** (sidebar, with a confirm step) removes everything created in the app
+  (jobs, people, organisations, saved queries, change log), puts people back in their
+  loaded jobs and refreshes the affected companies.
+- **Add people** takes at most 20 people at a time.
 - **Before vs Now** (Reports tab) compares a company's previous refresh with the latest one.
 - **Cleanup:** for each company, only the lines of its **last 2 refreshes** are kept.
   Employment history is never deleted.
@@ -141,12 +146,11 @@ CSV files are used once, to import the source data (`scripts/load_db.py`).
 Sidebar → **Database**:
 
 - **Job history:** pick a person and see every job in order: company, title, dates, and
-  whether it was a title change or a job change.
+  whether it was a title change or a job change. For PDL people, only the current job.
 - **Runs & cost:** the totals, then every run.
 - **SQL:** one `SELECT` or `WITH` statement. It runs as a **read-only database role**, inside
   a **read-only transaction**, is stopped after **5 seconds**, and gets **LIMIT 500** if it
-  has none. A dropdown has 8 example queries, plus queries saved with **Save query** (needs
-  the edit PIN).
+  has none. A dropdown has 8 example queries, plus queries saved with **Save query**.
 
 ![SQL tab: an example query with its result](docs/images/database_sql.png)
 
@@ -181,13 +185,13 @@ group by c.source;
 
 ## Safety and privacy
 
-- **View PIN (`DB_VIEW_PIN`):** without it, PDL people (real people) show as
-  "PDL person #id" everywhere:
-  - in the charts and tables;
-  - in Job history, where they can't be found by name;
-  - in SQL, where their rows are hidden.
-- **Edit PIN (`DB_EDIT_PIN`):** needed to add, remove, promote, refresh, undo or save a
-  query. Without it the buttons are disabled; viewing works for everyone.
+- **Open to everyone:** anyone can add, remove, promote, refresh, undo or save a query.
+  Changes are shared, and **Reset demo data** puts the loaded data back.
+- **PDL people (real people):** the app shows their name and current job only. Their past
+  jobs and past employers are hidden in the app and, by a database rule, in the SQL tab.
+- **No paid calls from visitors:** changes made in the app are placed by the rules. The app
+  never calls Gemini or PDL.
+- **Visitor text is shown as plain text:** names and titles can't add links or images.
 - **SQL tab:** a read-only role that can only read this project's tables. It can't see
   Supabase's own schemas (such as `auth` or `vault`), and queries that try to switch roles
   are refused.
@@ -222,8 +226,8 @@ people with a known manager who got a line.
 
 As an option, Gemini can place a person instead of the rules. It gets the person's name,
 title and unit, plus at most 8 candidate managers chosen by the rules: never the whole
-company, never the answer key. In the app, the choice is made per change, and Gemini runs
-at the next refresh; its tokens and cost go into that run.
+company, never the answer key. The public app uses the rules only, so visitors can't spend
+Gemini credits; the comparison below was run from `scripts/compare_judges.py`.
 
 Measured once on small samples ([docs/judge_comparison.md](docs/judge_comparison.md),
 `gemini-3.5-flash-lite`, threshold 0.7):
@@ -275,8 +279,6 @@ pip install -r requirements.txt
 |---|---|
 | `DATABASE_URL` | the database (Supabase session pooler address, with `[YOUR-PASSWORD]` in it) |
 | `DATABASE_PASSWORD` | the database |
-| `DB_EDIT_PIN` | optional: making changes in the app |
-| `DB_VIEW_PIN` | optional: showing PDL people's names |
 | `LOGFIRE_TOKEN` | optional: logging |
 | `GEMINI_API_KEY` | optional: the Gemini judge |
 | `PDL_API_KEY` | only for `scripts/pdl_load.py` when its cache is missing |
@@ -291,6 +293,8 @@ python scripts/run_sql.py db/migrations/003_costs.sql
 python scripts/run_sql.py db/migrations/004_trigger_once.sql
 python scripts/run_sql.py db/migrations/005_app_reads.sql
 python scripts/run_sql.py db/migrations/006_app_changes.sql
+python scripts/run_sql.py db/migrations/007_company_run_index.sql
+python scripts/run_sql.py db/migrations/008_public_app.sql
 python scripts/check_db.py              # version, tables and row counts
 ```
 
@@ -318,8 +322,8 @@ streamlit run app.py
 
 **Tests:**
 - `python scripts/test_app.py` (read only)
-- `python scripts/test_app_changes.py` (adds, refreshes and undoes changes, then puts the
-  database back exactly as it was)
+- `python scripts/test_app_changes.py` (adds, refreshes, undoes and resets changes, then puts
+  the database back exactly as it was)
 - `python scripts/compare_db_csv.py` (database vs CSV results)
 
 The CSV pipeline (`infer.py`, `evaluate.py`, held-out seed 7) still runs on files for
@@ -350,7 +354,7 @@ measuring.
   - adding the decision tree for confidence;
   - moving everything into a database with history;
   - keeping PDL credits to a small, cached batch;
-  - hiding real people's names behind a PIN.
+  - showing real people's current job only.
 - I worked step by step: a small plan first, small data first, and the AI explained each
   change in simple words before I moved on.
 - **I tested every feature myself in the app** (adding, removing, promoting, refresh, undo,

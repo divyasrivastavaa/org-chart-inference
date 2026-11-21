@@ -20,6 +20,7 @@ Each function opens its own connection and commits, or joins a transaction when 
   remove_person(person_id, moving_to=None)  closes the job; moving_to (company id or name
                                             in the database) opens a 'job_change' there
   undo_last()                               reverses the newest change not undone yet
+  reset_demo()                              removes everything created in the app
 """
 from contextlib import contextmanager
 
@@ -164,8 +165,9 @@ def remove_person(person_id, moving_to=None, judge="rules", conn=None):
         done = {"person_id": person_id, "opened": [], "closed": [job["employment_id"]],
                 "companies": [job["company_id"]], "moved_to": None}
         if moving_to:
-            row = c.execute("select company_id from companies where company_id = %s "
-                            "or lower(name) = lower(%s) order by company_id limit 1",
+            row = c.execute("select company_id from companies where source <> 'pdl_history' "
+                            "and (company_id = %s or lower(name) = lower(%s)) "
+                            "order by company_id limit 1",
                             (moving_to.strip(), moving_to.strip())).fetchone()
             if row and row[0] != job["company_id"]:
                 done["opened"].append(_open(c, person_id, row[0], job["title"],
@@ -249,3 +251,44 @@ def undo_last(conn=None):
         c.execute("update change_log set undone_at = now() where change_id = %s",
                   (ch["change_id"],))
     return ch
+
+
+def reset_demo(conn=None):
+    """Back to the loaded data, in one transaction: deletes every job, person, company and
+    saved query created in the app and the change log, and reopens the loaded jobs the app
+    closed. Marks the affected companies for a refresh. Run history (runs) is kept.
+    Returns counts and the affected company ids."""
+    with _tx(conn) as c:
+        c.execute("set local lock_timeout = '10s'")
+        c.execute("lock table companies, people, employments, reporting_lines, change_log, "
+                  "saved_queries in share row exclusive mode")     # no change can slip in
+        reopen = c.execute(
+            "select e.employment_id, e.company_id from employments e where e.source <> 'manual' "
+            "and not e.is_current and e.employment_id in "
+            "(select unnest(closed) from change_log)").fetchall()
+        jobs = c.execute("select employment_id, company_id, is_current from employments "
+                         "where source = 'manual'").fetchall()
+        people = [r[0] for r in c.execute(
+            "select person_id from people where source = 'manual'").fetchall()]
+        orgs = [r[0] for r in c.execute(
+            "select company_id from companies where source = 'manual'").fetchall()]
+        job_ids = [r[0] for r in jobs]
+        lines = c.execute(
+            "delete from reporting_lines where employment_id = any(%s) or person_id = any(%s) "
+            "or manager_id = any(%s) or proposed_manager_id = any(%s) or company_id = any(%s) "
+            "returning company_id, is_current", (job_ids, people, people, people, orgs)
+        ).fetchall()
+        c.execute("delete from employments where employment_id = any(%s)", (job_ids,))
+        c.execute("update employments set is_current = true, end_date = null "
+                  "where employment_id = any(%s)", ([r[0] for r in reopen],))
+        c.execute("delete from people where person_id = any(%s)", (people,))
+        c.execute("delete from companies where company_id = any(%s)", (orgs,))
+        queries = c.execute("delete from saved_queries").rowcount
+        logged = c.execute("delete from change_log").rowcount
+        affected = ({r[1] for r in reopen} | {r[1] for r in jobs if r[2]}
+                    | {r[0] for r in lines if r[1]}) - set(orgs)
+        c.execute("update companies set needs_refresh = true where company_id = any(%s)",
+                  (sorted(affected),))
+    return {"people": len(people), "jobs_removed": len(jobs), "jobs_reopened": len(reopen),
+            "companies_removed": len(orgs), "queries": queries, "changes": logged,
+            "companies": sorted(affected)}

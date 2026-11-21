@@ -3,7 +3,7 @@ scripts/test_app_changes.py  -  Phase 2, Step 10: changes made in the app are sa
 database. Drives the real app.py (Streamlit AppTest, no browser) with the rules only:
 no PDL and no Gemini call.
 
- 0. without the edit PIN: Add / Remove / Promote / Refresh are disabled
+ 0. no PIN: every button works; Add people refuses more than 20 people
  1. add a person to C001                      -> reload: they are there, waiting
  2. change a title in C001                    -> reload: new title shown
  3. move C001's Chief Data Officer to C002    -> reload: gone from C001, in C002
@@ -11,10 +11,11 @@ no PDL and no Gemini call.
  5. undo all three (reload between)           -> reload: as before
  6. refresh again                             -> only C001 and C002; same lines as at start
  7. save a query in the SQL tab               -> reload: in the dropdown
- 8. put the database back exactly as it was (lines, jobs, people, change log, runs, saved
+ 8. Reset demo data: the confirm step (with a stand-in), and the real reset + refresh inside
+    a transaction that is rolled back, so it never touches the saved data
+ 9. put the database back exactly as it was (lines, jobs, people, change log, runs, saved
     query), then check the totals.
 Every "reload" is a brand-new AppTest session, so nothing can come from browser memory.
-The edit PIN is read from the secrets and typed into the app's PIN box; never printed.
 Run from the repo root:  python scripts/test_app_changes.py
 """
 import sys
@@ -24,7 +25,11 @@ from streamlit.testing.v1 import AppTest
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
-from db.connect import get_connection, get_secret  # noqa: E402
+import pandas as pd  # noqa: E402
+
+import refresh  # noqa: E402
+from db import changes  # noqa: E402
+from db.connect import get_connection  # noqa: E402
 
 A, B = "C001", "C002"
 NEW_TITLE = "Engineering Director, Platform"
@@ -43,15 +48,12 @@ def q(sql, *p):
         return c.execute(sql, p or None).fetchall()
 
 
-def page(company=None, edit=True):
-    """A fresh app session (= a page reload), with the edit PIN typed in if edit."""
+def page(company=None):
+    """A fresh app session (= a page reload)."""
     at = AppTest.from_file(str(ROOT / "app.py"), default_timeout=300)
     if company:
         at.session_state["company_select"] = company
     at.run()
-    if edit:
-        box = next(t for t in at.text_input if t.label.startswith("Edit PIN"))
-        box.set_value(get_secret("DB_EDIT_PIN")).run()
     if at.exception:
         print("        exception:", at.exception[0].message[:300])
     return at
@@ -96,17 +98,23 @@ current_before = {(r[3], r[5], float(r[7]) if r[7] is not None else None)
 print(f"Start: totals (companies, people, employments, lines, runs) = {snap['totals']}")
 
 try:
-    # ------------------------------------------------------------ 0. no PIN: read only
-    print("0) without the edit PIN")
-    at = page(A, edit=False)
-    check(all(button(at, b).disabled for b in ("Add people", "Remove people",
-                                               "Promote / change title",
-                                               "Refresh changed companies")),
-          "Add / Remove / Promote / Refresh disabled")
+    # ------------------------------------------------------------ 0. no PIN
+    print("0) open to everyone, with a limit")
+    at = page(A)
+    check(not any(button(at, b).disabled for b in ("Add people", "Remove people",
+                                                   "Promote / change title",
+                                                   "Refresh changed companies")),
+          "Add / Remove / Promote / Refresh work without a PIN")
+    check(not any("PIN" in t.label for t in at.text_input), "no PIN boxes")
     check(len(people(at)) > 0, "viewing still works")
-    box = next(t for t in at.text_input if t.label.startswith("Edit PIN"))
-    box.set_value("not-the-pin").run()
-    check(any("Wrong edit PIN" in c.value for c in at.sidebar.caption), "wrong PIN refused")
+    manual_before = q("select count(*) from people where source = 'manual'")[0][0]
+    button(at, "Add people").click().run()
+    next(t for t in at.text_area if t.label.startswith("One person per line")) \
+        .set_value("\n".join(f"Limit Test {i} | Analyst" for i in range(21))).run()
+    button(at, "Add and save them").click().run()
+    check(any("at most 20" in e.value for e in at.error)
+          and q("select count(*) from people where source = 'manual'")[0][0] == manual_before,
+          "21 people refused, nothing saved")
 
     # ------------------------------------------------------------ 1. add a person
     print("1) add a person")
@@ -116,7 +124,7 @@ try:
         .set_value("Test Hire | Software Engineer").run()
     button(at, "Add and save them").click().run()
     check(not at.exception, "saved without error: " + " | ".join(flashes(at))[:120])
-    at = page(A, edit=False)                                     # reload
+    at = page(A)                                     # reload
     row = people(at)[lambda t: t.Name == "Test Hire"]
     check(len(row) == 1 and "waiting for refresh" in row.Status.iloc[0],
           f"after reload: Test Hire is on {A}, waiting for a refresh")
@@ -129,7 +137,7 @@ try:
     next(t for t in at.text_input if t.label == "New job title").set_value(NEW_TITLE).run()
     button(at, "Apply change").click().run()
     check(not at.exception, "saved without error: " + " | ".join(flashes(at))[:120])
-    at = page(A, edit=False)                                     # reload
+    at = page(A)                                     # reload
     check(NEW_TITLE in set(people(at).Title), f"after reload: title is '{NEW_TITLE}'")
 
     # ------------------------------------------------------------ 3. move to C002
@@ -142,9 +150,9 @@ try:
     next(t for t in at.text_input if t.label == "Moving to (optional)").set_value(B).run()
     button(at, "Remove them").click().run()
     check(not at.exception, "saved without error: " + " | ".join(flashes(at))[:120])
-    at = page(A, edit=False)                                     # reload
+    at = page(A)                                     # reload
     check("Chief Data Officer" not in set(people(at).Title), f"after reload: gone from {A}")
-    at = page(B, edit=False)
+    at = page(B)
     check("Chief Data Officer" in set(people(at).Title), f"after reload: on {B}")
 
     # ------------------------------------------------------------ 4. refresh
@@ -157,7 +165,7 @@ try:
             "gemini_calls, cost_usd from runs order by run_id desc limit 1")[0]
     check(run[1:4] == ("app_change", "succeeded", 2) and run[5] == 0,
           f"runs row: {run[:6]}, cost ${run[6]}")
-    at = page(A, edit=False)
+    at = page(A)
     row = people(at)[lambda t: t.Name == "Test Hire"]
     check(len(row) == 1 and "waiting" not in row.Status.iloc[0],
           f"Test Hire placed by the rules: {row.Status.iloc[0] if len(row) else '-'}")
@@ -171,7 +179,7 @@ try:
         button(at, "Undo last change").click().run()
         check(any(f.startswith("Undone:") for f in flashes(at)),
               " | ".join(flashes(at))[:120])
-    at = page(A, edit=False)                                     # reload
+    at = page(A)                                     # reload
     t = people(at)
     check("Test Hire" not in set(t.Name) and NEW_TITLE not in set(t.Title)
           and "Chief Data Officer" in set(t.Title), f"after reload: {A} is as before")
@@ -201,9 +209,65 @@ try:
     box = next(s for s in at.selectbox if s.label == "Example queries")
     check("Saved: Test saved query" in box.options, "after reload: in the dropdown")
 
+    # ------------------------------------------------------------ 8. reset demo data
+    print("8) reset demo data")
+    calls = []
+    real_reset, real_main = changes.reset_demo, refresh.main
+    changes.reset_demo = lambda: calls.append("reset") or {
+        "people": 0, "companies_removed": 0, "queries": 0, "companies": []}
+    refresh.main = lambda *a, **k: calls.append("refresh") or {}
+    try:
+        at = page()
+        button(at, "Reset demo data").click().run()
+        check(not calls and any(b.label == "Yes, reset everything" for b in at.button),
+              "the button only opens the confirm step")
+        button(at, "Cancel").click().run()
+        check(not calls, "Cancel changes nothing")
+        button(at, "Reset demo data").click().run()
+        button(at, "Yes, reset everything").click().run()
+        check(not at.exception and calls == ["reset", "refresh"], "Yes resets, then refreshes")
+    finally:
+        changes.reset_demo, refresh.main = real_reset, real_main
+
+    jobs_sql = ("select person_id, company_id, title from employments where is_current "
+                "and company_id = any(%s)")
+    lines_sql = ("select person_id, proposed_manager_id, confidence from reporting_lines "
+                 "where company_id = any(%s) and is_current")
+    with get_connection() as c, c.transaction(force_rollback=True):   # never saved
+        jobs0 = set(c.execute(jobs_sql, ([A, B],)).fetchall())
+        lines0 = {(r[0], r[1], float(r[2]) if r[2] is not None else None)
+                  for r in c.execute(lines_sql, ([A, B],)).fetchall()}
+        org = changes.add_company("Reset Test Org", conn=c)["company_id"]
+        changes.add_person("Reset Hire", org, "CEO", conn=c)
+        changes.add_person("Reset Hire", A, "Software Engineer", conn=c)
+        changes.change_title("C001-E0003", NEW_TITLE, conn=c)
+        mover = c.execute("select person_id from employments where company_id = %s and "
+                          "is_current and title = 'Chief Data Officer'", (A,)).fetchone()[0]
+        changes.remove_person(mover, B, conn=c)
+        changes.save_query("Reset test query", "select 1", conn=c)
+        done = changes.reset_demo(conn=c)
+        left = c.execute("select (select count(*) from people where source = 'manual'), "
+                         "(select count(*) from employments where source = 'manual'), "
+                         "(select count(*) from companies where source = 'manual'), "
+                         "(select count(*) from saved_queries), "
+                         "(select count(*) from change_log)").fetchone()
+        check(left == (0, 0, 0, 0, 0), f"nothing created in the app is left: {left}")
+        check(set(c.execute(jobs_sql, ([A, B],)).fetchall()) == jobs0,
+              f"{A}, {B}: everyone back in their loaded job")
+        check(set(done["companies"]) == {A, B}, f"affected companies: {done['companies']}")
+        run = c.execute("insert into runs (trigger, status) values ('app_change', 'running') "
+                        "returning run_id").fetchone()[0]
+        cur = c.execute(refresh.CURRENT_EMPLOYEES, ([A, B],))
+        frame = pd.DataFrame(cur.fetchall(), columns=[d.name for d in cur.description])
+        for cid, one in frame.groupby("company_id"):
+            refresh.refresh_company(c, run, cid, one)
+        lines1 = {(r[0], r[1], float(r[2]) if r[2] is not None else None)
+                  for r in c.execute(lines_sql, ([A, B],)).fetchall()}
+        check(lines1 == lines0, f"after the refresh, {A}, {B} have the same lines as before")
+
 finally:
-    # ------------------------------------------------------------ 8. back to the start
-    print("8) put the database back as it was")
+    # ------------------------------------------------------------ 9. back to the start
+    print("9) put the database back as it was")
     keep_ids = {r[0] for r in snap["lines"]}
     with get_connection() as c:                     # one transaction
         ex = lambda s, *p: c.execute(s, p or None).rowcount          # noqa: E731

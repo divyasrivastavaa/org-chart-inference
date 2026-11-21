@@ -40,9 +40,9 @@ the source data, imported once into the database, plus the files-based measuring
   reads), `db/changes.py` (every write: add/remove/promote/change job, undo_last,
   save_query; history is never overwritten: close the old row, open a new one),
   `db/costs.py` (prices), `db/telemetry.py` (Logfire).
-- App: edits need DB_EDIT_PIN; real PDL names need DB_VIEW_PIN; SQL tab runs as role
+- App: open to everyone, with "Reset demo data"; PDL people show current job only; SQL tab runs as role
   app_readonly in a READ ONLY transaction (5 s, LIMIT 500; set_config refused).
-- Secrets (names only): DATABASE_URL, DATABASE_PASSWORD, DB_EDIT_PIN, DB_VIEW_PIN,
+- Secrets (names only): DATABASE_URL, DATABASE_PASSWORD,
   LOGFIRE_TOKEN, GEMINI_API_KEY, PDL_API_KEY. Never print, log or commit them.
 - PDL: never call the API unless the user explicitly says so; use `data/pdl/cache/`.
 - Tests: `python scripts/test_app.py` (read only), `python scripts/test_app_changes.py`

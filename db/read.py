@@ -10,8 +10,8 @@ the same:
   true_manager_id, checkable
 level / function are read from the title (infer.parse_title), as predictions.csv had them.
 
-Privacy: people with source 'pdl' are real people. Unless show_pdl is True (the visitor
-entered DB_VIEW_PIN) their name is replaced by "PDL person #<id>".
+Privacy: people with source 'pdl' are real people. The app shows their name and current job
+only: job_history() and the SQL tab's role (migration 008) never return their past jobs.
 """
 import re
 import threading
@@ -118,13 +118,6 @@ def page_state(company_id):
             "last": {"summary": r.last_summary} if pd.notna(r.last_id) else None}
 
 
-def mask(frame, show_pdl, name_col="full_name", id_col="employee_id", source_col="person_source"):
-    if not show_pdl and len(frame):
-        pdl = frame[source_col] == "pdl"
-        frame.loc[pdl, name_col] = "PDL person #" + frame.loc[pdl, id_col].astype(str)
-    return frame
-
-
 # ---------------------------------------------------------------- front page
 def companies():
     """Every company with current employees: id, name, industry, dataset key, employees.
@@ -228,7 +221,7 @@ def _departments(df):
     return df
 
 
-def company(company_id, show_pdl):
+def company(company_id):
     """(chart frame, scored frame, truth frame) for one company: one query per table, sent
     together, only the columns the page uses.
     chart: everyone on the chart, with the current line from the last refresh.
@@ -261,7 +254,6 @@ def company(company_id, show_pdl):
     df["pending"] = True if pd.isna(co.last_refreshed_at) or co.needs_refresh \
         else df.recorded_at > co.last_refreshed_at
     df = _departments(df.drop(columns="recorded_at"))
-    df = mask(df, show_pdl)
     # Can a drawn line be checked? Benchmark: everyone. Real data: only a known manager.
     df["checkable"] = (df.company_source == "benchmark") | df.true_manager_id.notna()
     scored = df[df.true_manager_id.notna()][
@@ -323,11 +315,10 @@ def saved_queries():
     return query("select name, sql from saved_queries order by name")
 
 
-def employees(company_ids, show_pdl):
+def employees(company_ids):
     """Current employees of some companies, with the columns of employees.csv (for the
     in-memory what-if, which re-runs infer.predict on them)."""
     df = _departments(query(PEOPLE_SQL, (list(company_ids),)))
-    df = mask(df, show_pdl)
     df["source"] = df.person_source
     return df[["company_id", "company_name", "industry", "size", "employee_id", "full_name",
                "title", "department", "location", "source"]]
@@ -341,13 +332,11 @@ def companies_named(names, source):
                  "and source = %s", ([n.lower() for n in names], source)).company_id.tolist()
 
 
-def names_in(company_id, show_pdl):
-    """Names of the people working there now (PDL names masked without the PIN, so a
-    'name already taken' message can't reveal a real person)."""
-    df = query("select p.person_id as employee_id, p.full_name, p.source as person_source "
-               "from employments e join people p using (person_id) "
+def names_in(company_id):
+    """Names of the people working there now."""
+    df = query("select p.full_name from employments e join people p using (person_id) "
                "where e.company_id = %s and e.is_current", (company_id,))
-    return set(mask(df, show_pdl).full_name)
+    return set(df.full_name)
 
 
 def sources():
@@ -357,27 +346,41 @@ def sources():
 
 
 # ---------------------------------------------------------------- Database section
-def find_people(text, show_pdl, limit=50):
-    """People whose name or id contains text. Without the PIN, PDL people are found by
-    id only (searching a real person's name must not reveal that they are here)."""
+def find_people(text, limit=50):
+    """People whose name or id contains text."""
     like = f"%{text.strip()}%"
-    df = query("""
+    return query("""
         select p.person_id as employee_id, p.full_name, p.source as person_source
         from people p
-        where p.person_id ilike %s
-           or (p.full_name ilike %s and (p.source <> 'pdl' or %s))
-        order by p.person_id limit %s""", (like, like, show_pdl, limit))
-    return mask(df, show_pdl)
+        where p.person_id ilike %s or p.full_name ilike %s
+        order by p.person_id limit %s""", (like, like, limit))
 
 
 def job_history(person_id):
+    """Every job of a person, oldest first. PDL people (real people): current job only, and
+    nothing that points to an earlier one."""
     return query("""
         select e.employment_id, e.company_id, c.name as company, e.title, e.department,
-               e.seniority, e.start_date, e.end_date, e.is_current, e.change_type,
-               e.previous_employment_id, e.source
-        from employments e join companies c using (company_id)
-        where e.person_id = %s
+               e.seniority, e.start_date, e.end_date, e.is_current,
+               case when p.source = 'pdl' then null else e.change_type end as change_type,
+               case when p.source = 'pdl' then null else e.previous_employment_id end
+                   as previous_employment_id,
+               e.source
+        from employments e
+        join companies c using (company_id)
+        join people p using (person_id)
+        where e.person_id = %s and (e.is_current or p.source <> 'pdl')
         order by e.start_date nulls first, e.employment_id""", (person_id,))
+
+
+def demo_changes():
+    """What "Reset demo data" would remove: counts only."""
+    return query("""
+        select (select count(*) from people where source = 'manual') as people,
+               (select count(*) from employments where source = 'manual') as jobs,
+               (select count(*) from companies where source = 'manual') as companies,
+               (select count(*) from saved_queries) as queries,
+               (select count(*) from change_log) as changes""").iloc[0].astype(int).to_dict()
 
 
 def runs():
@@ -410,7 +413,7 @@ def check_sql(sql):
     return q, None
 
 
-def run_readonly(sql, show_pdl):
+def run_readonly(sql):
     """Runs one checked SELECT as role app_readonly in a READ ONLY transaction with a
     5-second timeout, then rolls back. Returns at most 500 rows."""
     q, problem = check_sql(sql)
@@ -422,8 +425,7 @@ def run_readonly(sql, show_pdl):
                 conn.execute("set transaction read only")
                 conn.execute("set local statement_timeout = '5s'")
                 conn.execute("set local role app_readonly")
-                if show_pdl:
-                    conn.execute("set local app.show_pdl_names = 'on'")
+                conn.execute("set local app.show_pdl_names = 'on'")  # names are public
                 cur = conn.execute(q)
                 rows = cur.fetchmany(500)
                 frame = pd.DataFrame(rows, columns=[d.name for d in cur.description])
@@ -493,6 +495,7 @@ order by c.source""",
     "Job changes and title changes (job history)": """select c.source as company_source, e.change_type, count(*) as jobs
 from employments e
 join companies c using (company_id)
+where c.source not in ('pdl', 'pdl_history')
 group by 1, 2
 order by 1, 2""",
 }

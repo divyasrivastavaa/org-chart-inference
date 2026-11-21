@@ -6,12 +6,11 @@ Front page: one searchable, sortable table of all companies from all datasets
 ("Benchmark": generated, "ASX/NZX leadership" and "UK government organograms": real,
 "PDL people": real people from People Data Labs), with a Dataset column and "Add people".
 Click a company name (or use the sidebar) to open that company's inferred org chart.
-Company page: a "What if" section (someone leaves, add people, promote) that changes the
-chart for this visitor only, in memory. Nothing is saved.
+Company page: add, remove, promote and undo. Changes are saved in the database for everyone;
+"Reset demo data" in the sidebar puts the loaded data back.
 Sidebar "Database": job history, runs & cost, read-only SQL.
 Run locally with:  streamlit run app.py
 """
-import hmac
 import json
 import re
 from pathlib import Path
@@ -20,12 +19,11 @@ import pandas as pd
 import psycopg
 import streamlit as st
 
-import judge_gemini
 import org_chart
 import refresh
 import whatif                    # only its title checks (check_title, in_context)
 from db import changes, read as dbread
-from db.connect import get_connection, get_secret
+from db.connect import get_connection
 
 st.set_page_config(page_title="Org Chart Inference", layout="wide")
 ROOT = Path(__file__).resolve().parent
@@ -41,6 +39,7 @@ MODEL_THRESHOLD = json.loads((ROOT / "models" / "confidence_tree.json").read_tex
     "decision_threshold"]
 UK_TUNE = {"U02", "U03", "U07", "U09", "U10", "U11"}   # UK fixes were designed on these
 PDL_MONTHLY_CREDITS = 100                               # free plan
+MAX_ADD = 20                                            # people per "Add people"
 TTL = 60                                                # seconds a database read is cached
 NOT_CONNECTED = ("**Database not connected.** The app reads everything from the database. "
                  "Check DATABASE_URL and DATABASE_PASSWORD in the Streamlit secrets, or "
@@ -56,18 +55,13 @@ def db(fn, *args):
         st.stop()
 
 
-def show_pdl_names():
-    """True once this visitor entered the right DB_VIEW_PIN."""
-    return bool(st.session_state.get("pdl_ok"))
-
-
-def can_edit():
-    """True once this visitor entered the right DB_EDIT_PIN (changes the database)."""
-    return bool(st.session_state.get("edit_ok"))
-
-
-EDIT_NOTE = ("Changes are saved in the database for everyone. Enter the edit PIN in the "
-             "sidebar to make them; viewing works without it.")
+def plain(text):
+    """Text typed by a visitor, safe to show to everyone in a Markdown element: no links,
+    images, formatting or colour directives. (An invisible space stops bare web and email
+    addresses from turning into links.)"""
+    text = re.sub(r"(?i)(www)\.", "\\1\u200b.", str(text).replace("://", ":\u200b//"))
+    text = text.replace("@", "\u200b@")
+    return re.sub(r"([\\`*_{}\[\]()#+\-.!|<>~:$=^&])", r"\\\1", str(text))
 
 
 def flash(kind, text):
@@ -105,8 +99,8 @@ def db_accuracy(threshold, company_ids):
 
 
 @st.cache_data(max_entries=40, show_spinner=False)
-def db_company(company_id, version, show_pdl):
-    return dbread.company(company_id, show_pdl)
+def db_company(company_id, version):
+    return dbread.company(company_id)
 
 
 @st.cache_data(max_entries=40, show_spinner=False)
@@ -124,14 +118,14 @@ def company_context(company_id, version, _people):
     return whatif.in_context(_people)
 
 
-# The built pages. show_pdl is in the key, so masked and real names are never mixed up.
+# The built pages
 @st.cache_data(max_entries=60, show_spinner=False)
-def chart_html(company_id, version, show_pdl, threshold, show_truth, func, pick, _view):
+def chart_html(company_id, version, threshold, show_truth, func, pick, _view):
     return org_chart.render_html(_view, show_truth, pick)
 
 
 @st.cache_data(max_entries=40, show_spinner=False)
-def levels_html(company_id, version, show_pdl, threshold, _people):
+def levels_html(company_id, version, threshold, _people):
     return org_chart.render_levels(_people, LEVELS)
 
 
@@ -144,42 +138,6 @@ def load_sources():
 @st.cache_data(ttl=TTL, show_spinner=False)
 def db_runs():
     return dbread.runs()
-
-
-@st.cache_resource
-def gemini_judge(api_key, model):
-    """One Gemini judge per key/model for the whole server; it remembers its answers in
-    memory, so the reruns of a page don't call the API again."""
-    return judge_gemini.GeminiJudge(api_key, model)
-
-
-def current_judge():
-    """The Gemini judge, or None if no key is set (or the package is missing)."""
-    key, model = judge_gemini.settings()
-    if not key:
-        return None
-    try:
-        return gemini_judge(key, model)
-    except judge_gemini.JudgeError:
-        return None
-
-
-JUDGES = {"rules": "Rules (default)", "gemini": "Gemini"}
-
-
-def judge_choice(key):
-    """The "Advanced" part of the Add / Remove people popups."""
-    with st.expander("Advanced: which judge places these people"):
-        choice = st.radio("Judge", list(JUDGES), format_func=JUDGES.get, key=key,
-                          horizontal=True, label_visibility="collapsed")
-        if choice == "gemini" and not judge_gemini.settings()[0]:
-            st.caption("No Gemini API key is set (GEMINI_API_KEY in Streamlit secrets), so "
-                       "the rules will place them.")
-        else:
-            st.caption("At the next refresh, Gemini chooses from the short list of candidate "
-                       "managers our rules find; its tokens are logged with that run. Lines "
-                       "below the confidence threshold are not drawn.")
-    return choice
 
 
 def when(dates):
@@ -211,8 +169,6 @@ def pct(x, digits=1):
 
 ss = st.session_state
 ss.setdefault("table_version", 0)
-ss.setdefault("pdl_ok", False)
-ss.setdefault("edit_ok", False)
 
 # ---------------------------------------------------------------- all datasets
 # Company IDs never clash (C001, R01, U01, P-...), so one table holds all of them.
@@ -243,6 +199,8 @@ if ss.get("company_select") not in [""] + list(company_label):
     ss.company_select = from_url if from_url in company_label else ""
 if ss.get("open_next"):            # set by the "Add people" window: open that company
     ss.company_select = ss.pop("open_next")
+if ss.pop("go_home", False):       # set by "Reset demo data": back to the front page
+    ss.company_select = ""
 table_key = f"company_table_{ss.table_version}"
 
 
@@ -332,8 +290,8 @@ def docs_dialog():
         "statements. All of them are in the database table `sources` and under the chart on "
         "each company's page; the exact quotes are in `scripts/build_real_truth.py`.\n"
         f"- **{PDL}:** {COUNTS.get('pdl', {}).get('people', 0)} senior people at one company, "
-        "with their job history, from the People Data Labs person API (cached; no answer "
-        "key). Their names are shown only with the PIN.")
+        "from the People Data Labs person API (cached; no answer key). The app shows their "
+        "current job only.")
 
 
 def set_flag(name, value):
@@ -357,18 +315,16 @@ def database_page():
     """Sidebar → Database: job history, runs & cost, and a read-only SQL box."""
     st.button("Back", icon=":material/arrow_back:", on_click=set_flag, args=("db_view", False))
     st.subheader("Database")
-    show = show_pdl_names()
     t_jobs, t_runs, t_sql = st.tabs(["Job history", "Runs & cost", "SQL"])
 
     with t_jobs:
         text = st.text_input("Find a person by name or id",
                              placeholder="e.g. C001-E0002, or part of a name")
         st.caption("Every job a person has had, oldest first. A change never overwrites "
-                   "anything: the old job is closed and a new one opened. "
-                   + ("" if show else "PDL people (real) can be found by their id only "
-                      "(e.g. P-…); their names need the PIN."))
+                   "anything: the old job is closed and a new one opened. For PDL people "
+                   "(real people), only the current job is shown.")
         if text.strip():
-            found = db(dbread.find_people, text, show)
+            found = db(dbread.find_people, text)
             if found.empty:
                 st.info("No one found.")
             else:
@@ -378,8 +334,9 @@ def database_page():
                                    format_func=label.get)
                 hist = db(dbread.job_history, pid)
                 kinds = hist.change_type.value_counts()
-                st.caption(f"{len(hist)} job(s): " + ", ".join(
-                    f"{n} {k.replace('_', ' ')}" for k, n in kinds.items()))
+                st.caption("Current job only." if pid.startswith("P-") else
+                           f"{len(hist)} job(s): " + ", ".join(
+                               f"{n} {k.replace('_', ' ')}" for k, n in kinds.items()))
                 st.dataframe(hist, hide_index=True, width="stretch")
 
     with t_runs:
@@ -416,11 +373,8 @@ def database_page():
                            height=220, key=f"sql_{pick}")
         s1, s2 = st.columns([3, 1], vertical_alignment="bottom")
         name = s1.text_input("Name to save this query as", key="save_name",
-                             disabled=not can_edit(),
-                             placeholder="e.g. Engineering managers" if can_edit()
-                             else "needs the edit PIN")
-        if s2.button("Save query", icon=":material/save:", disabled=not can_edit(),
-                     help=None if can_edit() else EDIT_NOTE, width="stretch"):
+                             placeholder="e.g. Engineering managers")
+        if s2.button("Save query", icon=":material/save:", width="stretch"):
             _, problem = dbread.check_sql(sql)
             if not name.strip():
                 st.warning("Give the query a name.")
@@ -429,14 +383,14 @@ def database_page():
             else:
                 db(changes.save_query, name, sql)
                 saved()
-                st.success(f"Saved as \"{name.strip()}\": it is in the dropdown now.")
+                st.success(f"Saved as \"{plain(name.strip())}\": it is in the dropdown now.")
         st.caption("Read only: runs as a role that can only read this project's tables, "
                    "inside a READ ONLY transaction, stopped after 5 seconds, at most 500 rows "
-                   "(LIMIT 500 is added if the query has no LIMIT). "
-                   + ("" if show else "PDL people's rows are hidden without the PIN."))
+                   "(LIMIT 500 is added if the query has no LIMIT). PDL people's past jobs are "
+                   "not visible here.")
         if st.button("Run query", type="primary", icon=":material/play_arrow:"):
             try:
-                result = dbread.run_readonly(sql, show)
+                result = dbread.run_readonly(sql)
             except ValueError as e:                   # refused before it reached the database
                 st.warning(str(e))
             except psycopg.errors.QueryCanceled:
@@ -464,17 +418,15 @@ def undo_last_change():
         flash("error", NOT_CONNECTED)
         return
     saved()
-    flash("success", f"Undone: {ch['summary']}. Marked for refresh: "
+    flash("success", f"Undone: {plain(ch['summary'])}. Marked for refresh: "
                      f"{', '.join(ch['company_ids'])}.")
 
 
 def refresh_now():
-    """Sidebar: re-infer only the companies with saved changes; logs the run and its cost
-    (and sends it to Logfire). Gemini is only used for changes that asked for it."""
+    """Sidebar: re-infer only the companies with saved changes, with the rules (free), and
+    log the run. The public app never calls Gemini."""
     try:
-        with get_connection() as conn:
-            wanted = refresh.gemini_people(conn)
-        out = refresh.main("app_change", current_judge() if wanted else None)
+        out = refresh.main("app_change")
     except (psycopg.Error, RuntimeError):
         flash("error", NOT_CONNECTED)
         return
@@ -486,6 +438,50 @@ def refresh_now():
              f"{out['people']:,} people, run {out['run_id']}."
              if n else ": nothing was waiting.")
           + ("".join(f" ⓘ {x}" for x in out["notes"])))
+
+
+@st.dialog("Reset demo data", on_dismiss=lambda: set_flag("resetting", False))
+def reset_dialog():
+    try:
+        n = dbread.demo_changes()
+    except (psycopg.Error, RuntimeError):
+        st.error(NOT_CONNECTED)
+        return
+    st.write("This puts the loaded data back **for everyone**. It removes every change made "
+             "in the app and can't be undone:")
+    st.markdown(f"- {n['people']} added people and {n['companies']} added organisations\n"
+                f"- {n['jobs']} jobs created in the app (people who left or moved go back to "
+                "their original job)\n"
+                f"- {n['queries']} saved queries and {n['changes']} entries in the change log")
+    yes, no = st.columns(2)
+    if no.button("Cancel", width="stretch"):
+        ss.resetting = False
+        st.rerun()
+    if not yes.button("Yes, reset everything", type="primary", width="stretch"):
+        return
+    try:
+        with st.spinner("Resetting and refreshing the affected companies…"):
+            done = changes.reset_demo()
+            st.cache_data.clear()
+            try:
+                refresh.main("app_change")
+            except (psycopg.Error, RuntimeError):
+                flash("warning", "The data was reset, but the refresh failed. Click \"Refresh "
+                                 "changed companies\" in the sidebar.")
+    except psycopg.errors.LockNotAvailable:
+        st.warning("Someone else is saving a change right now. Please try again.")
+        return
+    except (psycopg.Error, RuntimeError):
+        st.error(NOT_CONNECTED)
+        return
+    k = len(done["companies"])
+    flash("success", f"Demo data reset: {done['people']} people, {done['companies_removed']} "
+                     f"organisations and {done['queries']} saved queries removed; {k} "
+                     f"compan{'y' if k == 1 else 'ies'} refreshed.")
+    ss.resetting = False
+    ss.go_home = True              # the open company may have been removed
+    ss.highlight = None
+    st.rerun()
 
 
 def parse_people(table, text):
@@ -522,16 +518,18 @@ def add_people_dialog():
         text = st.text_area("One person per line: Name | Designation",
                             placeholder="Priya Shah | Chief Risk Officer\nData Engineer",
                             height=150, key="add_text")
-    st.caption("Saved in the database, with history, and marked \"manual\". They are placed "
-               "at the next refresh (\"Refresh changed companies\" in the sidebar). They have "
-               "no answer key, so they never count in precision.")
-    judge = judge_choice("add_judge")
+    st.caption(f"Up to {MAX_ADD} people at a time. Saved in the database, with history, and "
+               "marked \"manual\". They are placed at the next refresh (\"Refresh changed "
+               "companies\" in the sidebar). They have no answer key, so they never count in "
+               "precision.")
     if not st.button("Add and save them", type="primary"):
         return
     people = parse_people(table, text)
-    taken = set() if to == NEW_ORG else db(dbread.names_in, to, show_pdl_names())
+    taken = set() if to == NEW_ORG else db(dbread.names_in, to)
     names = [n for n, _ in people if n]
-    if to == NEW_ORG and not org_name.strip():
+    if len(people) > MAX_ADD:
+        st.error(f"Please add at most {MAX_ADD} people at a time (this list has {len(people)}).")
+    elif to == NEW_ORG and not org_name.strip():
         st.error("Please give the new organisation a name.")
     elif not people:
         st.error("Please add at least one person.")
@@ -539,8 +537,9 @@ def add_people_dialog():
         st.error("Every person needs a designation (job title).")
     elif set(names) & taken or len(names) != len(set(names)):
         st.error("These names are already in this company: "
-                 + ", ".join(sorted((set(names) & taken)
-                                    | {n for n in names if names.count(n) > 1})))
+                 + ", ".join(plain(n) for n in sorted((set(names) & taken)
+                                                      | {n for n in names
+                                                         if names.count(n) > 1})))
     else:
         try:
             with get_connection() as conn:            # one transaction: all saved, or none
@@ -552,7 +551,7 @@ def add_people_dialog():
                         name = f"New hire {k}" if f"New hire {k}" not in taken else ""
                         k += 1
                     taken.add(name)
-                    changes.add_person(name, to_id, desig, judge=judge, conn=conn)
+                    changes.add_person(name, to_id, desig, conn=conn)
         except (psycopg.Error, RuntimeError):
             st.error(NOT_CONNECTED)
             return
@@ -573,12 +572,11 @@ def remove_people_dialog(cid, co):
     st.caption("Saved in the database: their job here is closed (kept in their job history). "
                "If \"Moving to\" is a company in the database, they get a job there with the "
                "same title. Their team is placed again at the next refresh.")
-    judge = judge_choice("remove_judge")
     if not st.button("Remove them", type="primary", disabled=not leaving):
         return
     try:
         with get_connection() as conn:                # one transaction: all saved, or none
-            done = [changes.remove_person(eid, moving.strip() or None, judge=judge, conn=conn)
+            done = [changes.remove_person(eid, moving.strip() or None, conn=conn)
                     for eid in leaving]
     except ValueError as e:
         st.error(str(e))
@@ -590,7 +588,7 @@ def remove_people_dialog(cid, co):
     moved = sorted({d["moved_to"] for d in done if d["moved_to"]})
     flash("success", f"Saved: {len(done)} person(s) left {cid}"
           + (f" and moved to {', '.join(moved)}" if moved else "")
-          + (f" (\"{moving.strip()}\" is not in the database, so they just left)"
+          + (f" (\"{plain(moving.strip())}\" is not in the database, so they just left)"
              if moving.strip() and not moved else "") + ".")
     ss.removing = False
     st.rerun()
@@ -610,7 +608,7 @@ def change_title_dialog(cid, co):
         return
     problem = whatif.check_title(co, eid, new_title)
     if problem:
-        st.warning(problem)
+        st.warning(plain(problem))
         return
     try:
         changes.change_title(eid, new_title)
@@ -621,7 +619,8 @@ def change_title_dialog(cid, co):
         st.error(NOT_CONNECTED)
         return
     saved()
-    flash("success", f"Saved: {label[eid].split(' — ')[0]} is now \"{new_title.strip()}\".")
+    flash("success", f"Saved: {plain(label[eid].split(' — ')[0])} is now "
+                     f"\"{plain(new_title.strip())}\".")
     ss.changing = False
     st.rerun()
 
@@ -643,63 +642,22 @@ st.sidebar.divider()
 st.sidebar.markdown("**Database**")
 st.sidebar.button("Job history · Runs & cost · SQL", icon=":material/database:",
                   width="stretch", on_click=set_flag, args=("db_view", True))
-PIN = get_secret("DB_VIEW_PIN")
-
-
-def check_pin():
-    entered = ss.get("pin_input", "")
-    ss.pdl_ok = bool(PIN) and hmac.compare_digest(str(entered), str(PIN))
-    ss.pin_wrong = bool(entered) and not ss.pdl_ok
-    ss.pin_input = ""                           # never keep the PIN in the page
-
-
 waiting = STATE["waiting"]
 st.sidebar.button("Refresh changed companies", icon=":material/sync:", width="stretch",
-                  on_click=refresh_now, disabled=not can_edit(),
-                  help="Re-infers only the companies with saved changes and logs the run."
-                  if can_edit() else EDIT_NOTE)
+                  on_click=refresh_now,
+                  help="Re-infers only the companies with saved changes and logs the run.")
 st.sidebar.caption(f"{waiting} compan{'y' if waiting == 1 else 'ies'} waiting for a refresh.")
-EDIT_PIN = get_secret("DB_EDIT_PIN")
-
-
-def check_edit_pin():
-    entered = ss.get("edit_pin_input", "")
-    ss.edit_ok = bool(EDIT_PIN) and hmac.compare_digest(str(entered), str(EDIT_PIN))
-    ss.edit_pin_wrong = bool(entered) and not ss.edit_ok
-    ss.edit_pin_input = ""                      # never keep the PIN in the page
-
-
-if ss.edit_ok:
-    st.sidebar.caption("Editing is on: changes are saved in the database.")
-    st.sidebar.button("Stop editing", on_click=set_flag, args=("edit_ok", False),
-                      width="stretch")
-elif EDIT_PIN:
-    st.sidebar.text_input("Edit PIN (to add, remove, promote, refresh)", type="password",
-                          key="edit_pin_input", on_change=check_edit_pin)
-    if ss.get("edit_pin_wrong"):
-        st.sidebar.caption(":red[Wrong edit PIN.]")
-else:
-    st.sidebar.caption("Editing is off (no DB_EDIT_PIN set).")
-
-if ss.pdl_ok:
-    st.sidebar.caption("PDL people's names are shown.")
-    st.sidebar.button("Hide PDL names", on_click=set_flag, args=("pdl_ok", False),
-                      width="stretch")
-elif PIN:
-    st.sidebar.text_input("PIN to show PDL names", type="password", key="pin_input",
-                          on_change=check_pin,
-                          help="People from People Data Labs are real people. Without the "
-                               "PIN they are shown as 'PDL person #id'.")
-    if ss.get("pin_wrong"):
-        st.sidebar.caption(":red[Wrong PIN.]")
-else:
-    st.sidebar.caption("PDL people are shown as 'PDL person #id' (no DB_VIEW_PIN set).")
+st.sidebar.button("Reset demo data", icon=":material/restart_alt:", width="stretch",
+                  on_click=set_flag, args=("resetting", True),
+                  help="Removes every change made in the app and puts the loaded data back.")
 
 st.sidebar.divider()
 if st.sidebar.button("Docs: how it works", icon=":material/account_tree:", width="stretch"):
     docs_dialog()
 
-if ss.get("adding") and can_edit():
+if ss.get("resetting"):
+    reset_dialog()
+elif ss.get("adding"):
     add_people_dialog()
 cid = ss.company_select
 if cid and cid != STATE["company_id"]:
@@ -729,9 +687,7 @@ answer_key = ("the companies' written statements" if REAL
 # ================================================================ front page: all companies
 if not cid:
     st.button("Add people", icon=":material/add:", on_click=set_flag, args=("adding", True),
-              disabled=not can_edit(),
-              help="Add people to a company, or to a new organisation (saved in the "
-                   "database)" if can_edit() else EDIT_NOTE)
+              help="Add people to a company, or to a new organisation (saved in the database)")
 
     who = "people who can be checked (no answer key: PDL people and people added in the app)"
     answer_key = "the answer key of each dataset"
@@ -783,7 +739,7 @@ if not cid:
 # ================================================================ company page
 # This company from the database: the current lines (last refresh), plus people saved since
 # then (waiting for a refresh), scored rows and the answer key. Nothing is kept in memory.
-df, scored, truth_small = db(db_company, cid, COMPANY_V, show_pdl_names())
+df, scored, truth_small = db(db_company, cid, COMPANY_V)
 co = apply_threshold(df, threshold)
 # A manager who left or moved since the last refresh is no longer on this chart: their team
 # shows as not placed until the next refresh
@@ -799,21 +755,16 @@ func = domain_slot.selectbox("Domain", functions,
                              help="Show one function (Engineering, Sales …) under the CEO")
 
 # ---------------------------------------------------------------- buttons
-edit = can_edit()
-why_off = None if edit else EDIT_NOTE
 b1, b2, b3, b4, _ = st.columns([1.4, 1, 1.2, 1.7, 0.7])
 b1.button("Back to all companies", icon=":material/arrow_back:", on_click=back_to_all)
-b2.button("Add people", icon=":material/add:", on_click=set_flag, args=("adding", True),
-          disabled=not edit, help=why_off)
+b2.button("Add people", icon=":material/add:", on_click=set_flag, args=("adding", True))
 b3.button("Remove people", icon=":material/remove:", on_click=set_flag,
-          args=("removing", True), disabled=not edit, help=why_off)
+          args=("removing", True))
 b4.button("Promote / change title", icon=":material/swap_vert:", on_click=set_flag,
-          args=("changing", True), disabled=not edit, help=why_off)
-if not edit:
-    st.caption("ⓘ " + EDIT_NOTE)
-if ss.get("removing") and edit:
+          args=("changing", True))
+if ss.get("removing"):
     remove_people_dialog(cid, co)
-if ss.get("changing") and edit:
+if ss.get("changing"):
     change_title_dialog(cid, co)
 
 # ---------------------------------------------------------------- headline numbers
@@ -839,8 +790,7 @@ if len(pending):
                    "database; the chart is updated by \"Refresh changed companies\" in the "
                    "sidebar.")
         for r in pending.itertuples():
-            st.markdown(f"- {r.summary}" + (" · Gemini will place them" if r.judge == "gemini"
-                                            else ""))
+            st.markdown(f"- {plain(r.summary)}")
 latest = {}                       # (the in-memory what-if's per-person notes: none any more)
 co["change_note"] = None
 
@@ -923,24 +873,22 @@ with tab_people:
 
 with tab_chart:
     view = co if func == "All" else co[(co.function == func) | (co.level == 1)]
-    st.subheader(f"{info.company_name} — {func}")
+    st.subheader(f"{plain(info.company_name)} — {func}")
     pick = ss.get("highlight")
     pick = pick if pick in set(view.employee_id) else None
     if pick:
         h1, h2 = st.columns([4, 1])
-        h1.caption(f"Highlighted: **{names_by_id[pick]}** (picked in the People tab)")
+        h1.caption(f"Highlighted: **{plain(names_by_id[pick])}** (picked in the People tab)")
         h2.button("Clear highlight", on_click=set_flag, args=("highlight", None))
     # Our own HTML: names and titles are escaped inside org_chart.py before display
-    st.iframe(chart_html(cid, COMPANY_V, show_pdl_names(), threshold, show_truth, func, pick,
-                         view), height=720)
+    st.iframe(chart_html(cid, COMPANY_V, threshold, show_truth, func, pick, view), height=720)
     last = STATE["last"]                          # newest saved change (any company)
     u1, u2 = st.columns([1.2, 4])
     u1.button("Undo last change", icon=":material/undo:", on_click=undo_last_change,
-              disabled=not (edit and last),
-              help=(f"Undo: {last['summary']}" if last else "Nothing to undo")
-              if edit else EDIT_NOTE)
+              disabled=not last,
+              help=f"Undo: {plain(last['summary'])}" if last else "Nothing to undo")
     if last:
-        u2.caption(f"Last saved change: {last['summary']}")
+        u2.caption(f"Last saved change: {plain(last['summary'])}")
 
 
 def counts(frame, gone=frozenset(), interim=frozenset(), vacant=frozenset()):
@@ -956,7 +904,7 @@ def counts(frame, gone=frozenset(), interim=frozenset(), vacant=frozenset()):
 with tab_reports:
     now = co[~co.employee_id.isin(not_here)]
     st.markdown("**People by level**")
-    st.html(levels_html(cid, COMPANY_V, show_pdl_names(), threshold, now))
+    st.html(levels_html(cid, COMPANY_V, threshold, now))
     st.markdown("**People by department**")
     per_dept = now.dept_now.fillna("unknown").value_counts()
     st.bar_chart(per_dept.rename_axis("Department").reset_index(name="People"),
@@ -1064,7 +1012,7 @@ with tab_chart:
     while pd.notna(cur.manager_id) and len(chain) < 10:
         edge_conf = cur.confidence                     # confidence of THIS reporting line
         cur = co[co.employee_id == cur.manager_id].iloc[0]
-        chain.append(f"{cur.full_name} ({cur.title}) — confidence {edge_conf:.2f}")
+        chain.append(f"{plain(cur.full_name)} ({plain(cur.title)}) — confidence {edge_conf:.2f}")
     if chain:
         st.write("Reporting chain, bottom to top:")
         for i, c in enumerate(chain, 1):

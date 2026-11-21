@@ -4,7 +4,7 @@ scripts/test_app.py  -  Phase 2: app test. Runs the real app.py without a browse
   - front page: one table, totals for all companies; per dataset: precision / coverage =
     the numbers measured from the database
     (E9: Benchmark 95.8% / 63.1%, UK 84.5% / 18.8%, ASX/NZX 100.0% / 83.7%)
-  - company pages (Benchmark, UK with sources, ASX/NZX, PDL with names masked)
+  - company pages (Benchmark, UK with sources, ASX/NZX, PDL with real names, current job only)
   - Database view: job history, runs & cost, SQL (examples run; writes and set_config
     refused)
   - no database -> the "Database not connected" message, no crash
@@ -64,6 +64,8 @@ check(not at.get("button_group"), "no dataset filter buttons")
 front = next(t.value for t in at.dataframe if "dataset" in t.value.columns)
 check(len(front) == 533 and front.dataset.nunique() >= 4, "one table with a Dataset column")
 check(at.sidebar.button[-1].label == "Docs: how it works", "Docs is the last sidebar button")
+check(any(b.label == "Reset demo data" for b in at.sidebar.button), "Reset demo data button")
+check(not any("PIN" in t.label for t in at.text_input), "no PIN boxes")
 for key, (prec, cov) in expected.items():
     a = dbread.accuracy(0.7, everyone[everyone.dataset == key].company_id.tolist())
     got = (f"{a['precision']:.1%}", f"{a['coverage']:.1%}")
@@ -89,8 +91,22 @@ for cid, what in [("C001", "Benchmark"), ("U01", "UK"), ("R01", "ASX/NZX"),
     people = next((t for t in tables if "Name" in t.columns and "Status" in t.columns), None)
     check(people is not None and len(people) > 0, f"{what}: People tab has rows")
     if what == "PDL":
-        check(people.Name.str.startswith("PDL person #").all(),
-              "PDL: every name masked without the PIN")
+        check(not people.Name.str.startswith("PDL person #").any(), "PDL: real names shown")
+        pids = dbread.query("select person_id from people where source = 'pdl'").person_id
+        jobs = [dbread.job_history(p) for p in pids]
+        check(all(len(j) == 1 and j.is_current.all() and j.change_type.isna().all()
+                  and j.previous_employment_id.isna().all() for j in jobs),
+              f"PDL: Job history shows one current job for all {len(jobs)}, no past jobs")
+        n = dbread.run_readonly("select count(*) filter (where is_current) as now, "
+                                "count(*) filter (where not is_current) as past "
+                                "from employments where person_id like 'P-%'").iloc[0]
+        check(int(n.now) == 50 and int(n.past) == 0, "PDL: SQL tab sees 50 current jobs, 0 past")
+        n = dbread.run_readonly("select count(*) as n from companies "
+                                "where source = 'pdl_history'").n[0]
+        check(int(n) == 0, "PDL: SQL tab can't list their past employers")
+        n = dbread.run_readonly("select count(*) as n from people where source = 'pdl' "
+                                "and full_name is not null and full_name <> ''").n[0]
+        check(int(n) == 50, "PDL: SQL tab shows their names")
     if what == "UK":
         check(any("Organogram file on data.gov.uk" in md.value for md in at.markdown),
               "UK: sources listed under the chart (from the database)")
@@ -105,7 +121,7 @@ for cid, what in [("C001", "Benchmark"), ("U01", "UK"), ("R01", "ASX/NZX"),
 # ---------------------------------------------------------------- not placed, levels
 print("Not placed and People by level (C025)")
 import org_chart  # noqa: E402
-chart, _, _ = dbread.company("C025", False)
+chart, _, _ = dbread.company("C025")
 chart["manager_id"] = chart.pred_manager_id.where(chart.confidence >= 0.7)
 pay = org_chart.build_payload(chart, False)
 lachlan = next(i for i in pay["leads"] if pay["nodes"][i]["n"] == "Lachlan O'Brien")

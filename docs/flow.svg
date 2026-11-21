@@ -54,7 +54,7 @@
   <text class="m" x="763" y="126">scripts/pdl_load.py (cached)</text>
   <text class="t" x="763" y="146">50 senior people at 1 company,</text>
   <text class="t" x="763" y="162">with their job history</text>
-  <text class="t" x="763" y="178">real people: names need a PIN</text>
+  <text class="t" x="763" y="178">the app shows current job only</text>
 
   <path class="ar" d="M135 192 V214"/>
   <path class="ar" d="M378 192 V214"/>
@@ -132,7 +132,7 @@
   <text class="b" x="676" y="524">Changes and refresh</text>
   <text class="m" x="830" y="524">refresh.py</text>
   <text class="t" x="676" y="544">add · remove · promote · change job: saved</text>
-  <text class="t" x="676" y="562">with history (needs the edit PIN)</text>
+  <text class="t" x="676" y="562">with history · reset demo data</text>
   <text class="t" x="676" y="580">only changed companies are re-inferred</text>
   <text class="t" x="676" y="598">each run logged: time, cost · Logfire</text>
 

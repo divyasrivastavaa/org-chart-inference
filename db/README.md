@@ -27,11 +27,17 @@ belongs to one `run`, one company, one person and (if drawn) one manager, who is
 
 **Safety:** row level security is on for every table, which blocks Supabase's public web
 API. The app connects directly with its own login, and the read-only SQL tab uses a role
-that can only `SELECT`.
+that can only `SELECT`. That role can't see the past jobs or past employers of PDL people
+(migration 008); the app's Job history tab shows only their current job.
+
+**Open app:** anyone can make changes. "Reset demo data" (`changes.reset_demo`) deletes every
+job, person, company and saved query created in the app and the change log, reopens the
+loaded jobs the app closed, and refreshes the affected companies. The `runs` history stays.
 
 ## Example queries
 
-**1. One person's job history** (oldest first)
+**1. One person's job history** (oldest first; for PDL people, the SQL tab returns only the
+current job)
 
 ```sql
 select p.full_name, c.name as company, e.title, e.start_date, e.end_date,
@@ -103,7 +109,7 @@ Prices are set in `db/costs.py` (Gemini: list price per token, with its source l
 PDL: $0 per credit on the free plan). PDL calls are recorded as runs with
 `trigger = 'pdl_import'` by `scripts/pdl_record_runs.py`.
 
-**5. People without a manager** (in one company, with the reason)
+**5. People not placed** (in one company, with the reason)
 
 ```sql
 select p.full_name, e.title, rl.reason, rl.proposed_manager_id, rl.confidence
