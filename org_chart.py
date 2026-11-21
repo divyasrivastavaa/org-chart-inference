@@ -140,12 +140,12 @@ def render_html(view, show_truth, highlight=None):
 
 
 LEVEL_CSS = """<style>
-.lv-grid { display:grid; gap:12px;
+.lv-grid { display:grid; gap:12px; align-items:start;
            grid-template-columns:repeat(auto-fit, minmax(min(100%, 300px), 1fr)); }
 .lv-box { border:1px solid rgba(128,128,128,.4); border-radius:10px; min-width:0; }
 .lv-head { font-weight:600; padding:8px 12px;
            border-bottom:1px solid rgba(128,128,128,.4); }
-.lv-list { height:320px; overflow-y:auto; padding:4px 12px 8px; }
+.lv-list { max-height:420px; overflow-y:auto; padding:4px 12px 8px; }
 .lv-p { padding:5px 0; border-bottom:1px solid rgba(128,128,128,.18);
         overflow-wrap:anywhere; font-size:14px; line-height:1.3; }
 .lv-p summary { cursor:pointer; }
