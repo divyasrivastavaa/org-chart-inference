@@ -3,13 +3,41 @@ org_chart.py  -  interactive, expandable org chart for one company (plain HTML/C
 
 Starts with the top of the company only. Each card has a pill with the number of people
 under that person; clicking it shows their direct reports below, joined by a line.
-People without a manager are listed in a separate "Not placed" section, so nobody is lost.
+People whose line wasn't drawn are listed below the chart, so nobody is lost: team leads
+(each with their own small chart) and "Not yet placed" (a simple list, grouped by reason).
 Rendered with st.iframe (the replacement for the deprecated st.components.v1.html),
 so no extra library is needed.
 """
+import html
 import json
+import re
 
 import pandas as pd
+
+
+def plain_reason(reason):
+    """The stored reason in words for the page (the database keeps the original). These
+    people do have a manager: the reason says why the model couldn't tell who."""
+    r = reason.strip() if isinstance(reason, str) else ""
+    if not r or r in ("below threshold", "confidence below threshold"):
+        return "Confidence below the threshold"
+    if r.startswith("team manager not found"):
+        return "Their team's lead may be missing from the data"
+    if r == "candidate managers have unknown team":
+        return "The possible managers' teams are unknown"
+    if "possible managers" in r:
+        return "Several possible managers"
+    if r == "title could not be parsed":
+        return "Job title could not be read"
+    if r == "no more-senior person in same function":
+        return "No one more senior in the same function"
+    if r.startswith("a teamless 'Head of'"):
+        return "A 'Head of' with no team may be the VP"
+    if r.startswith("team belongs to"):
+        return "Sits in another function's team (dotted line?)"
+    if re.fullmatch(r"\d+ CEOs found", r):
+        return "The top of the company is unclear"
+    return r
 
 
 def build_payload(view, show_truth, highlight=None):
@@ -19,6 +47,8 @@ def build_payload(view, show_truth, highlight=None):
     nodes = {}
     for r in view.itertuples():
         mgr = r.manager_id if isinstance(r.manager_id, str) and r.manager_id in ids else None
+        # Domain view: their line is drawn, but their manager is in another domain
+        elsewhere = isinstance(r.manager_id, str) and r.manager_id not in ids
         title = r.title.strip() if isinstance(r.title, str) and r.title.strip() else "(no title)"
         vacant = str(getattr(r, "vacant", False)) == "True"     # leavers.csv / what-if
         if vacant:                       # "Chief Security Officer (vacant since Nov 2026, ...)"
@@ -42,7 +72,9 @@ def build_payload(view, show_truth, highlight=None):
             "ok": bool(r.manager_id == r.true_manager_id) if (show_truth and mgr and checkable)
             else None,
             "u": bool(show_truth and mgr and not checkable),     # drawn, but not checkable
-            "why": r.reason if isinstance(r.reason, str) else "",
+            "why": plain_reason(r.reason),
+            "top": r.reason == "top of company",
+            "x": elsewhere,
             "v": vacant,
             "lf": ("Left → " + moving if isinstance(moving, str) and moving else "Left")
             if left else None,
@@ -81,10 +113,21 @@ def build_payload(view, show_truth, highlight=None):
     for pid in order:
         nodes[pid]["tot"] = sum(1 + nodes[k]["tot"] for k in nodes[pid]["k"])
 
-    roots = sorted([p for p, n in nodes.items() if not n["m"] and n["l"] == 1], key=sort_key)
-    unplaced = sorted([p for p, n in nodes.items() if not n["m"] and n["l"] != 1],
-                      key=lambda p: (-nodes[p]["tot"], sort_key(p)))
-    return {"nodes": nodes, "roots": roots, "unplaced": unplaced, "truth": bool(show_truth),
+    def at_top(n):
+        return n["l"] == 1 or n["top"] or n["x"]
+
+    roots = sorted([p for p, n in nodes.items() if not n["m"] and at_top(n)], key=sort_key)
+    unplaced = [p for p, n in nodes.items() if not n["m"] and not at_top(n)]
+    leads = sorted([p for p in unplaced if nodes[p]["k"]],
+                   key=lambda p: (-nodes[p]["tot"], sort_key(p)))
+    groups = {}
+    for p in sorted([p for p in unplaced if not nodes[p]["k"]], key=sort_key):
+        groups.setdefault(nodes[p]["why"], []).append(p)
+    rest = [{"r": r, "ids": v} for r, v in
+            sorted(groups.items(), key=lambda kv: (-len(kv[1]), kv[0]))]
+    return {"nodes": nodes, "roots": roots, "leads": leads, "rest": rest,
+            "n_rest": sum(len(g["ids"]) for g in rest),
+            "led": sum(nodes[p]["tot"] for p in leads), "truth": bool(show_truth),
             "vacancies": any(n["v"] for n in nodes.values()),
             "leavers": any(n["lf"] for n in nodes.values()),
             "unchecked": any(n["u"] for n in nodes.values()),
@@ -94,6 +137,65 @@ def build_payload(view, show_truth, highlight=None):
 def render_html(view, show_truth, highlight=None):
     data = json.dumps(build_payload(view, show_truth, highlight), separators=(",", ":"))
     return TEMPLATE.replace("__DATA__", data.replace("</", "<\\/"))
+
+
+LEVEL_CSS = """<style>
+.lv-grid { display:grid; gap:12px;
+           grid-template-columns:repeat(auto-fit, minmax(min(100%, 300px), 1fr)); }
+.lv-box { border:1px solid rgba(128,128,128,.4); border-radius:10px; min-width:0; }
+.lv-head { font-weight:600; padding:8px 12px;
+           border-bottom:1px solid rgba(128,128,128,.4); }
+.lv-list { height:320px; overflow-y:auto; padding:4px 12px 8px; }
+.lv-p { padding:5px 0; border-bottom:1px solid rgba(128,128,128,.18);
+        overflow-wrap:anywhere; font-size:14px; line-height:1.3; }
+.lv-p summary { cursor:pointer; }
+.lv-t, .lv-n { display:block; font-size:12.5px; opacity:.72; }
+.lv-p ul { margin:4px 0 2px; padding-left:16px; }
+.lv-p li { margin:3px 0; font-size:13px; }
+.lv-none { opacity:.65; font-size:13px; padding:6px 0; }
+</style>"""
+
+
+def render_levels(people, labels):
+    """Reports tab: one box per level, each scrolling on its own. people = employee_id,
+    full_name, title, level_now, manager_id, reason. Everything is escaped."""
+    def who(r):
+        title = r.title.strip() if isinstance(r.title, str) and r.title.strip() else "(no title)"
+        return html.escape(str(r.full_name)), html.escape(title)
+
+    def level_of(x):
+        return int(x) if pd.notna(x) and int(x) in labels else None
+
+    rows = list(people.assign(_nm=people.full_name.astype(str)).sort_values("_nm").itertuples())
+    reports, by_level = {}, {}
+    for r in rows:
+        by_level.setdefault(level_of(r.level_now), []).append(r)
+        if isinstance(r.manager_id, str):
+            reports.setdefault(r.manager_id, []).append(r)
+    boxes = []
+    for key, label in [*labels.items(), (None, "unknown")]:
+        here = by_level.get(key, [])
+        items = []
+        for r in here:
+            name, title = who(r)
+            line = "" if isinstance(r.manager_id, str) or r.reason == "top of company" \
+                else '<span class="lv-n">reporting line not confirmed</span>'
+            mine = reports.get(r.employee_id, [])
+            if mine:
+                under = "".join("<li><b>{}</b><span class=\"lv-t\">{}</span></li>".format(*who(k))
+                                for k in mine)
+                n = f"{len(mine)} direct report{'s' if len(mine) != 1 else ''}"
+                items.append(f'<div class="lv-p"><details><summary><b>{name}</b>'
+                             f'<span class="lv-t">{title}</span><span class="lv-n">{n}</span>'
+                             f"{line}</summary><ul>{under}</ul></details></div>")
+            else:
+                items.append(f'<div class="lv-p"><b>{name}</b><span class="lv-t">{title}</span>'
+                             f"{line}</div>")
+        body = "".join(items) or '<div class="lv-none">No one at this level.</div>'
+        boxes.append(f'<section class="lv-box"><div class="lv-head">{html.escape(label)} '
+                     f'({len(here):,})</div><div class="lv-list" tabindex="0">{body}</div>'
+                     "</section>")
+    return LEVEL_CSS + '<div class="lv-grid">' + "".join(boxes) + "</div>"
 
 
 TEMPLATE = r"""
@@ -141,50 +243,51 @@ TEMPLATE = r"""
   .chev.up { transform:rotate(-135deg) translate(-1px,-1px); }
   svg.links { position:absolute; left:0; top:0; pointer-events:none; z-index:0; overflow:visible; }
   .empty { color:var(--muted); font-size:13px; padding:6px 4px; }
-  #np summary { margin:6px 0 10px; font-size:15px; font-weight:700; cursor:pointer; }
-  #np-about { margin:0 0 6px; }
-  /* Opened "Not placed": its own scroll box, as tall as the chart frame allows */
-  #np .tree { position:relative; max-height:calc(100vh - 90px); overflow:auto;
-              border:1px solid #e5e7eb; border-radius:10px; padding:0 4px; }
+  #np-note { margin:2px 0 10px; font-size:13.5px; color:var(--muted); }
+  .np-part { margin:0 0 10px; }
+  .np-part > summary { margin:6px 0; font-size:15px; font-weight:700; cursor:pointer; }
+  .np-box { max-height:calc(100vh - 60px); overflow:auto; border:1px solid #e5e7eb;
+            border-radius:10px; padding:6px 8px; }
+  .lead { border-bottom:1px solid #eef0f3; padding:4px 0; }
+  .lead > summary { cursor:pointer; font-size:13.5px; padding:3px 2px; }
+  .lead .size { color:var(--muted); font-size:12.5px; }
+  /* One team lead's small chart: scrolls on its own, so the lines scroll with it */
+  .lead .tree { position:relative; max-height:520px; overflow:auto; padding:0 4px 8px; }
+  .why { border-bottom:1px solid #eef0f3; padding:4px 0; }
+  .why > summary { cursor:pointer; font-size:13.5px; font-weight:700; padding:3px 2px; }
+  .rest-grid { display:grid; gap:12px; padding:6px 4px 10px;
+               grid-template-columns:repeat(auto-fill, minmax(min(100%, 210px), 1fr)); }
+  .rest-grid .card { width:auto; }
   hr { border:0; border-top:1px solid #e5e7eb; margin:6px 0; }
 </style>
 <div class="section" id="main"><h4>Org chart <span class="hint">· click a number to see that
   person's team</span></h4><div class="tree"></div></div>
 <hr>
-<details class="section" id="np"><summary>Not placed <span id="np-count"></span>
-  <span class="hint" id="np-hint">· click to show</span></summary>
-  <div class="hint" id="np-about"></div><div class="tree"></div></details>
+<div class="section" id="np">
+  <div id="np-note">These people do have a manager; the model wasn't confident enough to say
+    who, so it drew no line.</div>
+  <details class="np-part" id="leads"><summary id="leads-title"></summary>
+    <div class="np-box" id="lead-list"></div></details>
+  <details class="np-part" id="rest"><summary id="rest-title"></summary>
+    <div class="np-box" id="rest-list"></div></details>
+</div>
 <script>
 const D = __DATA__;
 const N = D.nodes;
-const state = { main: [], np: [] };            // expanded path per section
+const state = { main: [] };                    // expanded path per chart (main, L0, L1 ...)
+const leadsBox = document.getElementById("leads"), restBox = document.getElementById("rest");
 // Open the CEO's team straight away (only that one level; deeper levels stay closed).
 // With two people at the top, the first one who has a team is opened.
 const ceo = D.roots.find(id => N[id].k.length);
 if (ceo) state.main.push(ceo);
-// A person picked in the People tab: open every manager above them, in the right section
-if (D.hl) {
-  const chain = [];
-  for (let p = D.hl; N[p].m && chain.length < 100; p = N[p].m) chain.unshift(N[p].m);
-  const top = chain.length ? chain[0] : D.hl;
-  const sec = D.roots.includes(top) ? "main" : "np";
-  if (chain.length || sec === "np") state[sec] = chain;
-  if (sec === "np") document.getElementById("np").open = true;   // so the picked card shows
-}
 const fmt = n => n.toLocaleString("en-US");
+D.leads.forEach((id, i) => { state["L" + i] = [id]; });   // a lead's chart opens on their team
 
-// "Not placed" is closed until the visitor clicks its header
-const npBox = document.getElementById("np");
-document.getElementById("np-count").textContent = "(" + fmt(D.unplaced.length) + ")";
-document.getElementById("np-about").textContent =
-  fmt(D.unplaced.length) + " people without a manager (not confident enough to draw a line)";
-npBox.addEventListener("toggle", () => {
-  document.getElementById("np-hint").textContent = npBox.open ? "· click to hide" : "· click to show";
-  if (npBox.open) {
-    drawLinks("np");                            // lines can only be measured once it is visible
-    if (!npBox.querySelector(".card.hl")) npBox.scrollIntoView({ block: "start" });  // show it
-  }
-});
+document.getElementById("leads-title").textContent = "Team leads – reporting line not confirmed (" +
+  fmt(D.leads.length) + ", leading " + fmt(D.led) + " people)";
+document.getElementById("rest-title").textContent = "Not yet placed (" + fmt(D.n_rest) + ")";
+if (!D.leads.length) document.getElementById("lead-list").textContent = "No team leads here.";
+if (!D.n_rest) document.getElementById("rest-list").textContent = "No one here.";
 
 function initials(name) {
   const p = name.replace(/[^A-Za-z' -]/g, "").trim().split(/\s+/);
@@ -209,7 +312,8 @@ function card(id, sec, rowIdx) {
   else if (n.m) meta = "line confidence " + n.c.toFixed(2);
   else if (n.l === 1) meta = "top of company";
   else if (n.wu) meta = "waiting for a new manager";
-  else meta = n.why ? "not placed: " + esc(n.why) : "not placed";
+  else if (n.x) meta = "reports to someone in another domain";
+  else meta = (n.k.length ? "line not confirmed: " : "not placed: ") + esc(n.why);
   if (n.wu && n.it && n.m)
     meta = '<span class="left">interim</span> · reports to CEO · was under ' + esc(n.wu) +
            " · " + meta;
@@ -239,10 +343,9 @@ function card(id, sec, rowIdx) {
 function render(sec) {
   const root = document.querySelector("#" + sec + " .tree");
   root.innerHTML = "";
-  const first = sec === "main" ? D.roots : D.unplaced;
+  const first = sec === "main" ? D.roots : [D.leads[+sec.slice(1)]];
   if (!first.length) {
-    root.innerHTML = '<div class="empty">' +
-      (sec === "main" ? "No CEO found in this view." : "Everyone has a manager.") + "</div>";
+    root.innerHTML = '<div class="empty">No CEO found in this view.</div>';
     return;
   }
   const row0 = document.createElement("div");
@@ -264,8 +367,9 @@ function render(sec) {
 }
 
 function drawLinks(sec) {
-  // "Not placed" scrolls inside its own box: draw its lines in that box, so they scroll along
-  const box = sec === "np" ? document.querySelector("#np .tree") : document.getElementById(sec);
+  // A team lead's chart scrolls inside its own box: draw its lines there, so they scroll along
+  const box = sec === "main" ? document.getElementById(sec)
+                             : document.querySelector("#" + sec + " .tree");
   box.querySelectorAll("svg.links").forEach(s => s.remove());
   const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
   svg.setAttribute("class", "links");
@@ -298,9 +402,55 @@ function toggle(sec, rowIdx, id) {
   }
 }
 
-render("main"); render("np");
+// Team leads: one small collapsible chart each, drawn when it is opened
+const leadList = document.getElementById("lead-list");
+D.leads.forEach((id, i) => {
+  const n = N[id], el = document.createElement("details");
+  el.className = "lead"; el.id = "L" + i;
+  el.innerHTML = "<summary><b>" + esc(n.n) + "</b> · " + esc(n.t) + ' <span class="size">· team of ' +
+                 fmt(n.tot) + '</span></summary><div class="tree"></div>';
+  el.addEventListener("toggle", () => { if (el.open) render(el.id); });
+  leadList.appendChild(el);
+});
+// Not yet placed: a grid of cards per reason; each group is closed and drawn when first opened
+state.rest = [];
+const restList = document.getElementById("rest-list");
+D.rest.forEach(g => {
+  const el = document.createElement("details");
+  el.className = "why";
+  el.innerHTML = "<summary>" + esc(g.r) + " (" + fmt(g.ids.length) + ')</summary>' +
+                 '<div class="rest-grid"></div>';
+  const grid = el.querySelector(".rest-grid");
+  const fill = () => {
+    if (!grid.children.length) g.ids.forEach(id => grid.appendChild(card(id, "rest", 0)));
+  };
+  el.addEventListener("toggle", () => { if (el.open) fill(); });
+  if (g.ids.includes(D.hl)) { fill(); el.open = true; }     // picked in the People tab
+  restList.appendChild(el);
+});
+
+// A person picked in the People tab: open the chart or the list they are in
+if (D.hl) {
+  const chain = [];
+  for (let p = D.hl; N[p].m && chain.length < 100; p = N[p].m) chain.unshift(N[p].m);
+  const top = chain.length ? chain[0] : D.hl, i = D.leads.indexOf(top);
+  if (D.roots.includes(top)) { if (chain.length) state.main = chain; }
+  else if (i >= 0) {
+    if (chain.length) state["L" + i] = chain;
+    leadsBox.open = true;
+    document.getElementById("L" + i).open = true;
+    render("L" + i);
+  } else restBox.open = true;
+}
+[leadsBox, restBox].forEach(b => b.addEventListener("toggle", () => {
+  if (b.open && !b.querySelector(".hl")) b.scrollIntoView({ block: "start" });
+}));
+render("main");
 const picked = document.querySelector(".card.hl");
 if (picked) picked.scrollIntoView({ block: "center" });
-window.addEventListener("resize", () => { drawLinks("main"); drawLinks("np"); });
+window.addEventListener("resize", () => {
+  drawLinks("main");
+  document.querySelectorAll(".lead[open]").forEach(el => drawLinks(el.id));
+});
 </script>
 """

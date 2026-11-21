@@ -4,7 +4,7 @@ Streamlit app. Everything it shows is read from the Postgres database (db/read.p
 CSV files are only used once, to import the source data (scripts/load_db.py).
 Front page: one searchable, sortable table of all companies from all datasets
 ("Benchmark": generated, "ASX/NZX leadership" and "UK government organograms": real,
-"PDL people": real people from People Data Labs), with dataset buttons and "Add people".
+"PDL people": real people from People Data Labs), with a Dataset column and "Add people".
 Click a company name (or use the sidebar) to open that company's inferred org chart.
 Company page: a "What if" section (someone leaves, add people, promote) that changes the
 chart for this visitor only, in memory. Nothing is saved.
@@ -33,13 +33,14 @@ ROOT = Path(__file__).resolve().parent
 DATASETS = {"synthetic": "Benchmark", "real": "ASX/NZX leadership",
             "uk": "UK government organograms", "pdl": "PDL people (real)",
             "manual": "Added in the app"}
-GEN, ASX, UKN, PDL, MAN = (DATASETS[k] for k in ("synthetic", "real", "uk", "pdl", "manual"))
+GEN, ASX, UKN, PDL = (DATASETS[k] for k in ("synthetic", "real", "uk", "pdl"))
 OGL = ("Contains public sector information licensed under the "
        "[Open Government Licence v3.0]"
        "(https://www.nationalarchives.gov.uk/doc/open-government-licence/version/3/).")
 MODEL_THRESHOLD = json.loads((ROOT / "models" / "confidence_tree.json").read_text())[
     "decision_threshold"]
 UK_TUNE = {"U02", "U03", "U07", "U09", "U10", "U11"}   # UK fixes were designed on these
+PDL_MONTHLY_CREDITS = 100                               # free plan
 TTL = 60                                                # seconds a database read is cached
 NOT_CONNECTED = ("**Database not connected.** The app reads everything from the database. "
                  "Check DATABASE_URL and DATABASE_PASSWORD in the Streamlit secrets, or "
@@ -146,7 +147,7 @@ def judge_choice(key):
                        "the rules will place them.")
         else:
             st.caption("At the next refresh, Gemini chooses from the short list of candidate "
-                       "managers our rules find; its tokens and cost go into that run. Lines "
+                       "managers our rules find; its tokens are logged with that run. Lines "
                        "below the confidence threshold are not drawn.")
     return choice
 
@@ -180,10 +181,8 @@ def pct(x, digits=1):
 
 ss = st.session_state
 ss.setdefault("table_version", 0)
-ss.setdefault("datasets", list(DATASETS))
 ss.setdefault("pdl_ok", False)
 ss.setdefault("edit_ok", False)
-ss.datasets = ss.datasets          # keep the dataset buttons' choice while a company is open
 
 # ---------------------------------------------------------------- all datasets
 # Company IDs never clash (C001, R01, U01, P-...), so one table holds all of them.
@@ -308,6 +307,19 @@ def set_flag(name, value):
     ss[name] = value
 
 
+def what_it_used(r):
+    """One run in words, for the Runs & cost table."""
+    tokens = int(r.gemini_input_tokens + r.gemini_output_tokens)
+    parts = []
+    if r.pdl_credits_used or r.trigger == "pdl_import":
+        parts.append(f"PDL – {int(r.pdl_credits_used)} credit"
+                     + ("" if r.pdl_credits_used == 1 else "s"))
+    if r.gemini_calls or tokens:
+        parts.append(f"Gemini – {tokens:,} tokens")
+    label = " + ".join(parts) or "rules – free"
+    return label if r.status == "succeeded" else f"{label} ({r.status})"
+
+
 def database_page():
     """Sidebar → Database: job history, runs & cost, and a read-only SQL box."""
     st.button("Back", icon=":material/arrow_back:", on_click=set_flag, args=("db_view", False))
@@ -339,18 +351,27 @@ def database_page():
 
     with t_runs:
         runs = db(db_runs)
-        cost = runs.cost_usd.astype(float)
+        used = [what_it_used(r) for r in runs.itertuples()]
+        started = pd.to_datetime(runs.started_at, utc=True)
+        today = pd.Timestamp.now(tz="UTC")
+        this_month = (started.dt.year == today.year) & (started.dt.month == today.month)
+        credits = int(runs.pdl_credits_used[this_month].sum())
+        tokens = int(runs.gemini_input_tokens.sum() + runs.gemini_output_tokens.sum())
         r1, r2, r3, r4 = st.columns(4)
         r1.metric("Runs", f"{len(runs):,}")
-        r2.metric("Total cost", f"${cost.sum():,.4f}",
-                  help="Gemini tokens × list price + PDL credits × price (db/costs.py). "
-                       "The rules cost nothing.")
-        r3.metric("PDL credits used", f"{int(runs.pdl_credits_used.sum()):,}")
-        r4.metric("Gemini tokens",
-                  f"{int(runs.gemini_input_tokens.sum() + runs.gemini_output_tokens.sum()):,}")
-        st.caption("Newest first. A refresh re-infers only companies that changed; "
-                   "'pdl_import' rows are People Data Labs API calls.")
-        st.dataframe(runs, hide_index=True, width="stretch")
+        r2.metric("PDL credits used this month", f"{credits:,} of {PDL_MONTHLY_CREDITS}",
+                  delta=f"{max(PDL_MONTHLY_CREDITS - credits, 0):,} left", delta_color="off",
+                  delta_arrow="off")
+        r3.metric("Gemini calls", f"{int(runs.gemini_calls.sum()):,}",
+                  delta=f"{tokens:,} tokens", delta_color="off", delta_arrow="off")
+        r4.metric("Rules runs (free)", f"{sum(u.startswith('rules') for u in used):,}")
+        st.caption("Newest first. A refresh re-infers only the companies that changed.")
+        st.dataframe(pd.DataFrame({
+            "What it used": used, "Companies": runs.companies_processed,
+            "People": runs.people_processed, "Seconds": runs.seconds.astype(float),
+            "When (UTC)": started.dt.strftime("%d %b %H:%M")}
+            ).loc[started.sort_values(ascending=False).index],  # PDL rows were logged later
+            hide_index=True, width="stretch", placeholder="—")
 
     with t_sql:
         mine = db(dbread.saved_queries)               # saved from this tab (database)
@@ -429,7 +450,7 @@ def refresh_now():
     flash("success" if n else "info",
           f"Refreshed {n} compan{'y' if n == 1 else 'ies'}"
           + (f" ({', '.join(out['companies'][:10])}{' …' if n > 10 else ''}): "
-             f"{out['people']:,} people, run {out['run_id']}, cost ${out['cost_usd']:.4f}."
+             f"{out['people']:,} people, run {out['run_id']}."
              if n else ": nothing was waiting.")
           + ("".join(f" ⓘ {x}" for x in out["notes"])))
 
@@ -583,9 +604,6 @@ threshold = st.sidebar.slider("Confidence threshold", 0.5, 1.0, MODEL_THRESHOLD,
 show_truth = st.sidebar.checkbox("Show accuracy vs. answer key", value=True,
                                  help="Off: hides the precision numbers.")
 domain_slot = st.sidebar.container()      # the company page puts its "Domain" filter here
-st.sidebar.divider()
-if st.sidebar.button("Docs: how it works", icon=":material/account_tree:", width="stretch"):
-    docs_dialog()
 
 # ---------------------------------------------------------------- sidebar: Database
 st.sidebar.divider()
@@ -605,8 +623,8 @@ def check_pin():
 waiting = db(dbread.waiting_companies)
 st.sidebar.button("Refresh changed companies", icon=":material/sync:", width="stretch",
                   on_click=refresh_now, disabled=not can_edit(),
-                  help=("Re-infers only the companies with saved changes; logs the run and "
-                        "its cost.") if can_edit() else EDIT_NOTE)
+                  help="Re-infers only the companies with saved changes and logs the run."
+                  if can_edit() else EDIT_NOTE)
 st.sidebar.caption(f"{waiting} compan{'y' if waiting == 1 else 'ies'} waiting for a refresh.")
 EDIT_PIN = get_secret("DB_EDIT_PIN")
 
@@ -644,6 +662,10 @@ elif PIN:
 else:
     st.sidebar.caption("PDL people are shown as 'PDL person #id' (no DB_VIEW_PIN set).")
 
+st.sidebar.divider()
+if st.sidebar.button("Docs: how it works", icon=":material/account_tree:", width="stretch"):
+    docs_dialog()
+
 if ss.get("adding") and can_edit():
     add_people_dialog()
 cid = ss.company_select
@@ -661,45 +683,6 @@ if ss.get("db_view"):
 REAL = bool(cid) and dataset_of[cid] == "real"
 UK = bool(cid) and dataset_of[cid] == "uk" and cid not in NEW_ORGS
 PDLCO = bool(cid) and dataset_of[cid] == "pdl"
-N = {k: COUNTS.get(k, {"companies": 0, "people": 0}) for k in DATASETS}
-if cid in NEW_ORGS:
-    st.caption(f"**Dataset: {MAN}.** An organisation created in the app and saved in the "
-               "database. Everyone here was added by hand, so there is no answer key. No line "
-               "is drawn when confidence is below the threshold — a wrong line is worse than "
-               "no line.")
-elif REAL:
-    st.caption(f"**Dataset: {ASX}.** The leadership teams of {N['real']['companies']} "
-               "ASX/NZX-listed companies, from each company's own website (14 Nov 2026). "
-               "Reporting lines are inferred from job titles only. Accuracy is checked only "
-               f"for the {COUNTS['confirmed_lines']} people whose manager the company has "
-               "confirmed in writing.")
-elif PDLCO:
-    st.caption(f"**Dataset: {PDL}.** Real people from the People Data Labs person API "
-               "(senior people only, with their job history; see Database → Job history). "
-               "There is no answer key, so accuracy can't be checked. Names are shown only "
-               "with the PIN. No line is drawn when confidence is below the threshold — a "
-               "wrong line is worse than no line.")
-elif UK:
-    st.caption(f"**Dataset: {UKN}.** The senior-staff organogram this organisation "
-               "publishes on data.gov.uk. The model sees only names (often withheld), job "
-               "titles and units; the published \"reports to\" column is the answer key and is "
-               "never shown to it. No line is drawn when confidence is below the threshold — "
-               "a wrong line is worse than no line. " + OGL)
-elif cid:
-    st.caption(f"**Dataset: {GEN}.** Made by our data generator, which keeps an answer key "
-               "of every true manager. Reporting lines are inferred from job titles only. "
-               "No line is drawn when confidence is below the threshold — "
-               "a wrong line is worse than no line.")
-else:
-    st.caption("Reporting lines are inferred only from a list of names and job titles. "
-               f"{GEN}: {N['synthetic']['companies']:,} generated companies with a hidden "
-               f"answer key. {UKN}: {N['uk']['companies']} real UK government organisations, "
-               f"whose published reporting lines are the answer key. {ASX}: "
-               f"{N['real']['companies']} real leadership teams, where only the "
-               f"{COUNTS['confirmed_lines']} managers confirmed in writing serve as an answer "
-               f"key. {PDL}: {N['pdl']['people']} real people at {N['pdl']['companies']} "
-               "company, no answer key. All read from the database. No line is drawn when "
-               "confidence is below the threshold — a wrong line is worse than no line.")
 who = ("people with a confirmed manager" if REAL
        else "people (excluding the top post)" if UK
        else "people with a known manager (none: no answer key)" if PDLCO
@@ -709,35 +692,14 @@ answer_key = ("the companies' written statements" if REAL
 
 # ================================================================ front page: all companies
 if not cid:
-    st.write("Click a company's name to see its org chart. Filter by dataset, search with "
-             "the magnifying glass (top right of the table), sort by clicking a column header.")
     st.button("Add people", icon=":material/add:", on_click=set_flag, args=("adding", True),
               disabled=not can_edit(),
               help="Add people to a company, or to a new organisation (saved in the "
                    "database)" if can_edit() else EDIT_NOTE)
 
-    def pills():
-        st.subheader("Companies")
-        return st.pills("Dataset", list(DATASETS), selection_mode="multi", key="datasets",
-                        format_func=DATASETS.get, label_visibility="collapsed")
-
-    chosen = ss.datasets           # the pills below; read now so the metrics come first
-    if not chosen:
-        pills()
-        st.info("Pick at least one dataset above.")
-        st.stop()
-    checked_who = {"synthetic": f"{GEN}: everyone except CEOs",
-                   "uk": f"{UKN}: everyone except the top post",
-                   "real": f"{ASX}: only people with a confirmed manager",
-                   "pdl": f"{PDL}: nobody (no answer key)",
-                   "manual": f"{MAN}: nobody (no answer key)"}
-    key_of = {"synthetic": f"the answer key ({GEN})",
-              "uk": f"the published reporting lines ({UKN})",
-              "real": f"the companies' written statements ({ASX})",
-              "pdl": f"no answer key ({PDL})", "manual": f"no answer key ({MAN})"}
-    who = "people who can be checked (" + "; ".join(checked_who[k] for k in chosen) + ")"
-    answer_key = " or ".join(key_of[k] for k in chosen)
-    shown = companies[companies.dataset.isin(chosen)].reset_index(drop=True)
+    who = "people who can be checked (no answer key: PDL people and people added in the app)"
+    answer_key = "the answer key of each dataset"
+    shown = companies
     # Per company from the database: lines drawn, people scored, given a line, right
     table = shown.merge(db(db_stats, threshold), on="company_id", how="left")
     n_scored, n_given, n_right = (int(table[c].fillna(0).sum())
@@ -748,13 +710,12 @@ if not cid:
     c1.metric("Companies", f"{len(shown):,}")
     c2.metric("People", f"{int(shown.employees.sum()):,}")
     c3.metric("Coverage", pct(coverage),
-              help=f"For the datasets selected below: share of {who} who got a manager "
+              help=f"All companies: share of {who} who got a manager "
                    f"({n_scored:,} people can be checked)")
     if show_truth:
         c4.metric("Precision", pct(precision),
-                  help=f"For the datasets selected below: of the reporting lines drawn, the "
+                  help=f"All companies: of the reporting lines that can be checked, the "
                        f"share that match {answer_key}")
-    pills()
 
     table["lines"] = table.lines.fillna(0)
     table["coverage"] = 100 * table.given / table.scored.where(table.scored > 0)
@@ -763,18 +724,15 @@ if not cid:
     table = table.sort_values("employees", ascending=False, kind="stable").reset_index(drop=True)
     ss.table_ids = table.company_id.tolist()      # row number -> company, for open_clicked
     table["dataset"] = table.dataset.map(DATASETS.get)
-    if "real" in chosen:
-        st.caption(f"{ASX}: coverage and precision only count people whose manager "
-                   "the company confirmed in writing; \"None\" = no such people at that "
-                   "company.")
     columns = ["company_name", "dataset", "industry", "employees", "lines", "coverage"] + \
         (["precision"] if show_truth else [])
     st.dataframe(
         table, key=table_key, on_select=open_clicked, selection_mode="single-cell",
-        hide_index=True, width="stretch", height=560 if chosen != ["real"] else 740,
+        hide_index=True, width="stretch", height=640,
         column_order=columns,
         column_config={
-            "company_name": st.column_config.TextColumn("Company"),
+            "company_name": st.column_config.TextColumn(
+                "Company", help="Click a name to open its org chart"),
             "dataset": st.column_config.TextColumn("Dataset"),
             "industry": st.column_config.TextColumn("Industry"),
             "employees": st.column_config.NumberColumn("Employees", format="%d"),
@@ -875,7 +833,7 @@ def person_status(r):
     parts = ["interim (reports to CEO)" if r.employee_id in interim_ids and pd.notna(r.manager_id)
              else "placed" if pd.notna(r.manager_id)
              else "top of company" if reason == "top of company"
-             else f"not placed: {reason}"]
+             else f"not placed: {org_chart.plain_reason(reason)}"]
     if r.employee_id in latest:
         ch = latest[r.employee_id][0]
         parts.append(KIND_WORD.get(ch["kind"], "title changed")
@@ -960,33 +918,24 @@ def counts(frame, gone=frozenset(), interim=frozenset(), vacant=frozenset()):
 
 with tab_reports:
     now = co[~co.employee_id.isin(not_here)]
-    r1, r2 = st.columns(2)
-    with r1:
-        st.markdown("**People per level**")
-        per_level = now.level_now.map(LEVELS).fillna("unknown").value_counts()
-        per_level = per_level.reindex(list(LEVELS.values()) + (   # all 8 levels, 0 if none
-            ["unknown"] if "unknown" in per_level else []), fill_value=0)
-        # Horizontal, so the labels fit; "1 · CEO" ... "8 · Junior" sort top to bottom
-        st.bar_chart(per_level.rename_axis("Level").reset_index(name="People"), x="Level",
-                     y="People", color=CHART_BLUE, horizontal=True, sort=False,
-                     height=max(300, 28 * len(per_level) + 70))
-    with r2:
-        st.markdown("**People per department**")
-        per_dept = now.dept_now.fillna("unknown").value_counts()
-        st.bar_chart(per_dept.rename_axis("Department").reset_index(name="People"),
-                     x="Department", y="People", color=CHART_BLUE, horizontal=True,
-                     sort="-People", height=max(300, 28 * len(per_dept) + 70))  # every label
+    st.markdown("**People by level**")
+    st.html(org_chart.render_levels(now, LEVELS))
+    st.markdown("**People by department**")
+    per_dept = now.dept_now.fillna("unknown").value_counts()
+    st.bar_chart(per_dept.rename_axis("Department").reset_index(name="People"),
+                 x="Department", y="People", color=CHART_BLUE, horizontal=True,
+                 sort="-People", height=max(300, 28 * len(per_dept) + 70))  # every label
     st.markdown("**Reporting lines**")
     n_now = counts(co, left_ids, interim_ids, vacant_ids)
     k1, k2, k3 = st.columns(3)
     k1.metric("Lines drawn", f"{n_now['Lines drawn']:,}")
     k2.metric("Not placed", f"{n_now['Not placed']:,}",
-              help="No manager drawn: no candidate, several candidates, or confidence below "
-                   "the threshold")
+              help="These people do have a manager; the model wasn't confident enough to "
+                   "say who, so it drew no line.")
     k3.metric("Top of company", int((now.reason == "top of company").sum()))
     gaps = now[now.manager_id.isna() & (now.reason != "top of company")]
     if len(gaps):
-        why = gaps.reason.fillna("below threshold").replace("", "below threshold")
+        why = gaps.reason.map(org_chart.plain_reason)
         top_why = why.value_counts().head(5)
         st.markdown("Top reasons for \"not placed\"")
         st.dataframe(pd.DataFrame({"Reason": top_why.index, "People": top_why.values,
@@ -1055,6 +1004,8 @@ with tab_reports:
 # ---------------------------------------------------------------- sources (real companies)
 if REAL or UK:
     st.markdown("##### Sources")
+    if UK:
+        st.caption(OGL)                               # the licence requires this credit
     for s in db(load_sources)[lambda s: s.company_id == cid].itertuples():
         if UK:
             st.markdown(f"- [Organogram file on data.gov.uk]({s.url}) — {s.what_it_shows}. "
@@ -1082,9 +1033,6 @@ with tab_chart:
         for i, c in enumerate(chain, 1):
             st.write(f"{i}. {c}")
     else:
-        st.write(f"No manager assigned. Reason: {row.reason or 'below threshold'}")
-
-    st.subheader("People left without a manager")
-    st.dataframe(co[co.manager_id.isna() & ~co.employee_id.isin(not_here)][
-        ["full_name", "title", "department", "reason"]],
-                 width="stretch", hide_index=True)
+        st.write("Top of company." if row.reason == "top of company" else
+                 "No line drawn: the model wasn't confident enough to say who. Reason: "
+                 + org_chart.plain_reason(row.reason))

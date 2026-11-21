@@ -357,7 +357,7 @@ order by c.name""",
        gemini_input_tokens + gemini_output_tokens as gemini_tokens, pdl_credits_used, cost_usd
 from runs
 order by run_id desc""",
-    "People without a manager (one company)": """select p.full_name, e.title, rl.reason
+    "People not placed (one company)": """select p.full_name, e.title, rl.reason
 from reporting_lines rl
 join people p on p.person_id = rl.person_id
 left join employments e on e.person_id = rl.person_id
