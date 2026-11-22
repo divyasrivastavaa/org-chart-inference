@@ -1,9 +1,9 @@
 """
-scripts/demo_changes.py  -  Phase 2: demo of db/changes.py on one Benchmark company.
+scripts/demo_changes.py  -  Phase 2: demo of db/changes.py on one company.
 
-On C001: adds 2 new people, promotes one manager ("Engineering Manager, Platform" ->
-"Engineering Director, Platform") and moves the Chief Data Officer to C002. Then runs
-refresh.py: only C001 and C002 should be processed. Prints the companies refreshed, the
+On N001: adds 2 new people, promotes one manager ("Engineering Manager, Platform" ->
+"Engineering Director, Platform") and moves the Chief Data Officer to N002. Then runs
+refresh.py: only N001 and N002 should be processed. Prints the companies refreshed, the
 runs row and the moved person's full job history.
 
 Everything the demo does is written to data/demo_changes.json, so
@@ -24,7 +24,7 @@ from db import changes  # noqa: E402
 from db.connect import get_connection  # noqa: E402
 
 RECORD = ROOT / "data" / "demo_changes.json"
-COMPANY, OTHER = "C001", "C002"
+COMPANY, OTHER = "N001", "N002"
 
 
 def table(conn, sql, *params):

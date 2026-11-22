@@ -25,8 +25,7 @@ import infer
 from db import connect, display
 
 # Dataset keys used by the app -> companies.source in the database
-SOURCE_OF = {"synthetic": "benchmark", "real": "asx_nzx", "uk": "uk_organogram", "pdl": "pdl",
-             "manual": "manual"}
+SOURCE_OF = {"companies": "pdl_company", "pdl": "pdl", "manual": "manual"}
 DATASET_OF_SOURCE = {v: k for k, v in SOURCE_OF.items()}
 # Same mapping as refresh.py: PDL department words -> the department names infer.py knows
 PDL_DEPARTMENTS = {"engineering": "Engineering", "sales": "Sales",
@@ -170,13 +169,9 @@ def counts():
                count(e.employment_id) as people
         from companies c join employments e on e.company_id = c.company_id and e.is_current
         group by c.source""")
-    out = {DATASET_OF_SOURCE.get(r.source, r.source): {"companies": int(r.companies),
-                                                      "people": int(r.people)}
-           for r in df.itertuples()}
-    out["confirmed_lines"] = int(query(
-        "select count(*) as n from answer_key a join companies c using (company_id) "
-        "where c.source = 'asx_nzx' and a.true_manager_id is not null").n[0])
-    return out
+    return {DATASET_OF_SOURCE.get(r.source, r.source): {"companies": int(r.companies),
+                                                       "people": int(r.people)}
+            for r in df.itertuples()}
 
 
 def accuracy(threshold, company_ids=None):
@@ -259,8 +254,8 @@ def company(company_id):
     df["pending"] = True if pd.isna(co.last_refreshed_at) or co.needs_refresh \
         else df.recorded_at > co.last_refreshed_at
     df = _departments(df.drop(columns="recorded_at"))
-    # Can a drawn line be checked? Benchmark: everyone. Real data: only a known manager.
-    df["checkable"] = (df.company_source == "benchmark") | df.true_manager_id.notna()
+    # Can a drawn line be checked? PDL companies: everyone. Other data: only a known manager.
+    df["checkable"] = (df.company_source == "pdl_company") | df.true_manager_id.notna()
     scored = df[df.true_manager_id.notna()][
         ["company_id", "employee_id", "true_manager_id", "pred_manager_id", "confidence"]]
     # Refreshed: people with a line, plus people saved since the last refresh (waiting).
@@ -315,6 +310,11 @@ def last_two_refreshes(company_id):
     return df
 
 
+def database_bytes():
+    """The database's current size, in bytes."""
+    return int(query("select pg_database_size(current_database()) as n").n[0])
+
+
 def waiting_companies():
     """How many companies have saved changes waiting for a refresh."""
     return int(query("select count(*) as n from companies c where needs_refresh and exists "
@@ -348,12 +348,6 @@ def names_in(company_id):
     df = query("select p.full_name, p.source from employments e join people p using (person_id) "
                "where e.company_id = %s and e.is_current", (company_id,))
     return set(display.apply(df.full_name, df.source == "pdl", display.proper_name))
-
-
-def sources():
-    """Where each real company / organisation comes from (was data/real/sources.csv)."""
-    return query("select dataset, company_id, company_name, url, what_it_shows, "
-                 "date_checked, licence from sources order by source_id")
 
 
 # ---------------------------------------------------------------- Database section
@@ -461,7 +455,7 @@ EXAMPLES = {
 from employments e
 join people p using (person_id)
 join companies c using (company_id)
-where e.person_id = 'C001-E0002'
+where e.person_id = 'N001-E0002'
 order by e.start_date nulls first, e.employment_id""",
     "A company's current org chart": """select p.full_name, e.title, m.full_name as manager, rl.confidence, rl.reason
 from reporting_lines rl
@@ -469,7 +463,7 @@ join people p      on p.person_id = rl.person_id
 left join people m on m.person_id = rl.manager_id
 left join employments e on e.person_id = rl.person_id
                        and e.company_id = rl.company_id and e.is_current
-where rl.company_id = 'C001' and rl.is_current
+where rl.company_id = 'N001' and rl.is_current
 order by m.full_name nulls first, p.full_name""",
     "Companies that need a refresh": """select c.company_id, c.name, c.source, c.last_refreshed_at
 from companies c
@@ -486,7 +480,7 @@ from reporting_lines rl
 join people p on p.person_id = rl.person_id
 left join employments e on e.person_id = rl.person_id
                        and e.company_id = rl.company_id and e.is_current
-where rl.company_id = 'C001' and rl.is_current and rl.manager_id is null
+where rl.company_id = 'N001' and rl.is_current and rl.manager_id is null
   and rl.reason is distinct from 'top of company'
 order by rl.reason, p.full_name""",
     "Cost and credits per day and trigger": """select started_at::date as day, trigger, count(*) as runs,

@@ -2,8 +2,8 @@
 scripts/compare_db_csv.py  -  Phase 2: database. Read only.
 Precision and coverage from the database (current reporting_lines vs answer_key) next to
 the CSV results (predictions.csv vs truth.csv) for exactly the same companies.
-Scored people: those with a known true manager (as in evaluate.py; Benchmark people
-missing from the data and ASX/NZX people without a written source are not scored).
+Scored people: those with a known true manager (as in evaluate.py; people missing from the
+data are not scored). Needs data/pdl_synth/predictions.csv: python infer.py data/pdl_synth
 Also: lines drawn at the PDL companies (no answer key) and the last runs.
 Run from the repo root:  python scripts/compare_db_csv.py
 """
@@ -16,7 +16,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 from db.connect import get_connection  # noqa: E402
 
-FOLDERS = {"benchmark": "data", "asx_nzx": "data/real", "uk_organogram": "data/uk"}
+FOLDERS = {"pdl_company": "data/pdl_synth"}
 
 
 def query(conn, sql, *params):

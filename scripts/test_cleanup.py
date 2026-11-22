@@ -3,7 +3,7 @@ scripts/test_cleanup.py  -  Phase 2: tests refresh.py's cleanup rule (keep only 
 reporting lines of each company's last 2 refreshes) on one company, then puts the
 database back exactly as it was.
 
-On C003, whose chart comes from one earlier refresh (run R0):
+On N003, whose chart comes from one earlier refresh (run R0):
   1. change one person's title       -> refresh (run A): lines of R0 + A kept, 0 deleted
   2. change the title back           -> refresh (run B): R0 is now 3 refreshes old, so its
                                         lines are deleted; lines of A + B kept
@@ -25,7 +25,7 @@ import refresh  # noqa: E402
 from db import changes  # noqa: E402
 from db.connect import get_connection  # noqa: E402
 
-COMPANY, PERSON = "C003", "C003-E0036"
+COMPANY, PERSON = "N003", "N003-E0036"
 SAVE = ROOT / "data" / "cleanup_test.json"
 LINE_COLS = ["line_id", "run_id", "company_id", "person_id", "employment_id",
              "proposed_manager_id", "manager_id", "confidence", "reason", "judge",

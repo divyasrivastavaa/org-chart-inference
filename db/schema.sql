@@ -43,16 +43,17 @@ create unique index runs_pdl_import_note_idx on runs (note) where trigger = 'pdl
 
 -- ------------------------------------------------------------------ companies
 create table companies (
-    company_id        text primary key,              -- C001 (Benchmark), R01 (ASX/NZX), U01 (UK),
-                                                     -- P01 (PDL), M001 (added by hand)
+    company_id        text primary key,              -- N001 (PDL companies),
+                                                     -- P01 (PDL people), M001 (added by hand)
     name              text not null,
     industry          text,
     size_band         text,                          -- e.g. '51-200'
     country           text,
     website           text,
     source            text not null
-                      check (source in ('benchmark', 'asx_nzx', 'uk_organogram', 'pdl',
+                      check (source in ('pdl',
                                         'pdl_history',   -- a past employer in PDL job history
+                                        'pdl_company',   -- PDL free company dataset
                                         'manual')),      -- added by hand (db/changes.py)
     source_ref        text,                          -- id in the source (e.g. the PDL company id)
     needs_refresh     boolean not null default true, -- org chart must be re-inferred
@@ -68,11 +69,11 @@ create index companies_name_idx on companies (lower(name));
 -- ------------------------------------------------------------------ people
 -- A person exists once, even after moving between companies.
 create table people (
-    person_id    text primary key,                   -- existing data: the old employee_id
-                                                     -- (C001-E0001); PDL: 'P-' + PDL person id
-    full_name    text,                               -- may be withheld (UK organograms)
+    person_id    text primary key,                   -- N001-E0001 (generated);
+                                                     -- PDL people: 'P-' + PDL person id
+    full_name    text,                               -- may be blank
     source       text not null
-                 check (source in ('benchmark', 'asx_nzx', 'uk_organogram', 'pdl', 'manual')),
+                 check (source in ('pdl', 'generated', 'manual')),
     source_ref   text,                               -- id in the source (e.g. the PDL person id)
     linkedin_url text,
     created_at   timestamptz not null default now(),
@@ -162,12 +163,12 @@ create table answer_key (
     company_id      text not null references companies (company_id),
     person_id       text not null references people (person_id),
     true_manager_id text,     -- null = top of company. No foreign key on purpose: in the
-                              -- Benchmark some true managers are missing from the data
+                              -- generated data some true managers are missing from the data
                               -- (scenario 'manager_missing'), so they are not in people.
     true_level      smallint,
-    evidence_type   text,     -- Benchmark: 'generator'; ASX/NZX: written source; UK: published
+    evidence_type   text,     -- PDL companies: 'generator'
     source_url      text,
-    scenario        text,     -- Benchmark hard cases: 'shared_manager', 'manager_missing', ...
+    scenario        text,     -- generator hard cases: 'shared_manager', 'manager_missing', ...
     primary key (company_id, person_id)
 );
 create index answer_key_true_manager_idx on answer_key (true_manager_id);

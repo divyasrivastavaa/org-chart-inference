@@ -3,8 +3,8 @@ scripts/test_app.py  -  Phase 2: app test. Runs the real app.py without a browse
 (Streamlit AppTest) against the database and checks:
   - front page: one table, totals for all companies; per dataset: precision / coverage =
     the numbers measured from the database
-    (E9: Benchmark 95.8% / 63.1%, UK 84.5% / 18.8%, ASX/NZX 100.0% / 83.7%)
-  - company pages (Benchmark, UK with sources, ASX/NZX, PDL with real names, current job only)
+    (PDL companies)
+  - company pages (PDL company, PDL people with real names, current job only)
   - Database view: job history, runs & cost, SQL (examples run; writes and set_config
     refused)
   - Add people / Promote popups: "+ New organisation" first, spelling suggestions (saving is
@@ -56,9 +56,10 @@ at.run()
 no_errors(at, "front page, all datasets")
 m = metrics(at)
 print("        ", m)
-check(m.get("Companies") == "533", "533 companies (500 + 12 + 20 + 1 PDL)")
-expected = {"synthetic": ("95.8%", "63.1%"), "uk": ("84.5%", "18.8%"),
-            "real": ("100.0%", "83.7%")}
+n_companies = int(dbread.query("select count(*) as n from companies "
+                               "where source = 'pdl_company'").n[0]) + 1
+check(m.get("Companies") == f"{n_companies:,}",
+      f"{n_companies} companies (PDL companies + Atlassian)")
 everyone = dbread.companies()
 total = dbread.accuracy(0.7, everyone.company_id.tolist())
 check((m.get("Precision"), m.get("Coverage")) == (f"{total['precision']:.1%}",
@@ -66,22 +67,18 @@ check((m.get("Precision"), m.get("Coverage")) == (f"{total['precision']:.1%}",
       f"cards = all companies: {m.get('Precision')}, {m.get('Coverage')}")
 check(not at.get("button_group"), "no dataset filter buttons")
 front = next(t.value for t in at.dataframe if "dataset" in t.value.columns)
-check(len(front) == 533 and front.dataset.nunique() >= 4, "one table with a Dataset column")
+check(len(front) == n_companies and front.dataset.nunique() >= 2, "one table with a Dataset column")
 check(at.sidebar.button[-1].label == "Docs: how it works", "Docs is the last sidebar button")
 check(any(b.label == "Reset demo data" for b in at.sidebar.button), "Reset demo data button")
 check(not any("PIN" in t.label for t in at.text_input), "no PIN boxes")
-for key, (prec, cov) in expected.items():
-    a = dbread.accuracy(0.7, everyone[everyone.dataset == key].company_id.tolist())
-    got = (f"{a['precision']:.1%}", f"{a['coverage']:.1%}")
-    check(got == (prec, cov), f"{key}: precision {got[0]} (expected {prec}), "
-                              f"coverage {got[1]} (expected {cov})")
+check(not set(everyone.dataset) - {"companies", "pdl", "manual"},
+      "only PDL companies and Atlassian are in the app")
 pdl = everyone[everyone.dataset == "pdl"]
 check(int(pdl.employees.sum()) == 53, "pdl: 53 people (50 + 3 leaders)")
 
 # ---------------------------------------------------------------- company pages
 print("Company pages")
-for cid, what in [("C001", "Benchmark"), ("U01", "UK"), ("R01", "ASX/NZX"),
-                  ("P-" , "PDL")]:
+for cid, what in [("N001", "PDL company"), ("P-", "PDL")]:
     at = new_app()
     if cid == "P-":                                   # the PDL company (Atlassian)
         cid = dbread.query("select company_id from companies where source = 'pdl'"
@@ -136,25 +133,19 @@ for cid, what in [("C001", "Benchmark"), ("U01", "UK"), ("R01", "ASX/NZX"),
         n = dbread.run_readonly("select count(*) as n from people where source = 'pdl' "
                                 "and full_name is not null and full_name <> ''").n[0]
         check(int(n) == 53, "PDL: SQL tab shows their names")
-    if what == "UK":
-        check(any("Organogram file on data.gov.uk" in md.value for md in at.markdown),
-              "UK: sources listed under the chart (from the database)")
-    if what == "ASX/NZX":
-        check(any("leadership page" in md.value for md in at.markdown),
-              "ASX/NZX: sources listed")
-    if what == "Benchmark":
-        exp = dbread.accuracy(0.7, ["C001"])
+    if what == "PDL company":
+        exp = dbread.accuracy(0.7, ["N001"])
         check(m.get("Precision") == f"{exp['precision']:.1%}",
-              f"C001 precision {m.get('Precision')} = database {exp['precision']:.1%}")
+              f"N001 precision {m.get('Precision')} = database {exp['precision']:.1%}")
 
 # ---------------------------------------------------------------- not placed, levels
-print("Not placed and People by level (C025)")
+print("Not placed and People by level (N025)")
 import org_chart  # noqa: E402
-chart, _, _ = dbread.company("C025")
+chart, _, _ = dbread.company("N025")
 chart["manager_id"] = chart.pred_manager_id.where(chart.confidence >= 0.7)
 pay = org_chart.build_payload(chart, False)
-lachlan = next(i for i in pay["leads"] if pay["nodes"][i]["n"] == "Lachlan O'Brien")
-check(pay["nodes"][lachlan]["tot"] == 58, "Lachlan O'Brien is a team lead with 58 people")
+check(bool(pay["leads"]) and all(pay["nodes"][i]["tot"] > 0 for i in pay["leads"]),
+      f"{len(pay['leads'])} team leads, each with people under them")
 no_line = chart[chart.manager_id.isna() & (chart.reason != "top of company")]
 check(len(pay["leads"]) + pay["n_rest"] == len(no_line), "both sections together = everyone "
       "without a drawn line")
@@ -173,7 +164,7 @@ at.session_state["db_view"] = True
 at.run()
 no_errors(at, "Database view")
 check([t.label for t in at.tabs][:3] == ["Job history", "Runs & cost", "SQL"], "3 tabs")
-at.text_input[0].set_value("C001-E0002").run()
+at.text_input[0].set_value("N001-E0002").run()
 no_errors(at, "job history search")
 hist = [t.value for t in at.dataframe if "change_type" in t.value.columns]
 check(bool(hist) and len(hist[0]) >= 1, "job history shows the person's jobs")
@@ -238,18 +229,18 @@ try:
 
     def add_popup(line):
         a = new_app()
-        a.session_state["company_select"] = "C001"
+        a.session_state["company_select"] = "N001"
         a.run()
         click(a, "Add people")
         next(t for t in a.text_area if t.label.startswith("One person")).set_value(line).run()
         return click(a, "Add and save them")
 
     at = new_app()
-    at.session_state["company_select"] = "C001"
+    at.session_state["company_select"] = "N001"
     at.run()
     click(at, "Add people")
-    box = at.selectbox(key="add_to_C001")
-    check(box.options[0] == "+ New organisation" and box.value == "C001",
+    box = at.selectbox(key="add_to_N001")
+    check(box.options[0] == "+ New organisation" and box.value == "N001",
           "company page: + New organisation is first, this company is the default")
     check(not any(t.label == "Name of the new organisation" for t in at.text_input),
           "company page: no name box until it is chosen")
@@ -261,23 +252,23 @@ try:
     check("Did you mean: Chief Data Officer?" in warned(at) and not calls,
           "Add: warns before saving")
     click(at, "Use suggestion")
-    check(calls == [("Spell Test", "C001", "Chief Data Officer")], f"Add: suggestion saved {calls}")
+    check(calls == [("Spell Test", "N001", "Chief Data Officer")], f"Add: suggestion saved {calls}")
     calls.clear()
     at = add_popup("Spell Test | Cheif Data Officer")
     click(at, "Keep as typed")
-    check(calls == [("Spell Test", "C001", "Cheif Data Officer")], f"Add: kept as typed {calls}")
+    check(calls == [("Spell Test", "N001", "Cheif Data Officer")], f"Add: kept as typed {calls}")
     calls.clear()
     at = add_popup("Cheif Manger | Data Engineer")
-    check(not warned(at) and calls == [("Cheif Manger", "C001", "Data Engineer")],
+    check(not warned(at) and calls == [("Cheif Manger", "N001", "Data Engineer")],
           "Add: names are not checked")
     calls.clear()
 
     def promote(title):
         a = new_app()
-        a.session_state["company_select"] = "C001"
+        a.session_state["company_select"] = "N001"
         a.run()
         click(a, "Promote / change title")
-        next(s for s in a.selectbox if s.label == "Who?").set_value("C001-E0003").run()
+        next(s for s in a.selectbox if s.label == "Who?").set_value("N001-E0003").run()
         next(t for t in a.text_input if t.label == "New job title").set_value(title).run()
         return click(a, "Apply change")
 
@@ -285,7 +276,7 @@ try:
     check(any("Engineering Director, Platform" in w for w in warned(at)) and not calls,
           "Promote: warns before saving")
     click(at, "Use suggestion")
-    check(calls == [("C001-E0003", "Engineering Director, Platform")],
+    check(calls == [("N001-E0003", "Engineering Director, Platform")],
           f"Promote: suggestion saved {calls}")
     calls.clear()
     calls.clear()

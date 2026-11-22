@@ -1,5 +1,7 @@
 # Rules vs Gemini judge
 
+> **Offline evidence.** Measured on the earlier datasets, which are no longer in the app.
+
 - **Model:** `gemini-3.5-flash-lite`, Gemini API free tier.
 - **Daily free-tier limit for this model and key:** at least 143 requests per day (all 143 questions fitted in one day; Google AI Studio shows the exact number).
 - **Run:** 16 Nov 2026 by `scripts/compare_judges.py`, threshold 0.7 for both judges.

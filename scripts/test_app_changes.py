@@ -4,12 +4,12 @@ database. Drives the real app.py (Streamlit AppTest, no browser) with the rules 
 no PDL and no Gemini call.
 
  0. no PIN: every button works; Add people refuses more than 20 people
- 1. add a person to C001                      -> reload: they are there, waiting
- 2. change a title in C001                    -> reload: new title shown
- 3. move C001's Chief Data Officer to C002    -> reload: gone from C001, in C002
- 4. Refresh changed companies                 -> only C001 and C002; runs row logged
+ 1. add a person to N001                      -> reload: they are there, waiting
+ 2. change a title in N001                    -> reload: new title shown
+ 3. move N001's Chief Data Officer to N002    -> reload: gone from N001, in N002
+ 4. Refresh changed companies                 -> only N001 and N002; runs row logged
  5. undo all three (reload between)           -> reload: as before
- 6. refresh again                             -> only C001 and C002; same lines as at start
+ 6. refresh again                             -> only N001 and N002; same lines as at start
  7. save a query in the SQL tab               -> reload: in the dropdown
  8. Reset demo data: the confirm step (with a stand-in), and the real reset + refresh inside
     a transaction that is rolled back, so it never touches the saved data
@@ -31,7 +31,7 @@ import refresh  # noqa: E402
 from db import changes  # noqa: E402
 from db.connect import get_connection  # noqa: E402
 
-A, B = "C001", "C002"
+A, B = "N001", "N002"
 NEW_TITLE = "Engineering Director, Platform"
 failures = []
 
@@ -133,14 +133,14 @@ try:
     print("2) change a title")
     at = page(A)
     button(at, "Promote / change title").click().run()
-    next(s for s in at.selectbox if s.label == "Who?").set_value("C001-E0003").run()
+    next(s for s in at.selectbox if s.label == "Who?").set_value("N001-E0003").run()
     next(t for t in at.text_input if t.label == "New job title").set_value(NEW_TITLE).run()
     button(at, "Apply change").click().run()
     check(not at.exception, "saved without error: " + " | ".join(flashes(at))[:120])
     at = page(A)                                     # reload
     check(NEW_TITLE in set(people(at).Title), f"after reload: title is '{NEW_TITLE}'")
 
-    # ------------------------------------------------------------ 3. move to C002
+    # ------------------------------------------------------------ 3. move to N002
     print("3) move someone to another company")
     mover = q("select person_id from employments where company_id = %s and is_current "
               "and title = 'Chief Data Officer'", A)[0][0]
@@ -240,7 +240,7 @@ try:
         org = changes.add_company("Reset Test Org", conn=c)["company_id"]
         changes.add_person("Reset Hire", org, "CEO", conn=c)
         changes.add_person("Reset Hire", A, "Software Engineer", conn=c)
-        changes.change_title("C001-E0003", NEW_TITLE, conn=c)
+        changes.change_title("N001-E0003", NEW_TITLE, conn=c)
         mover = c.execute("select person_id from employments where company_id = %s and "
                           "is_current and title = 'Chief Data Officer'", (A,)).fetchone()[0]
         changes.remove_person(mover, B, conn=c)

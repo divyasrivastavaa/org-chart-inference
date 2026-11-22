@@ -1,10 +1,8 @@
 """
 app.py  -  Step 7 + Phase 2: database
-Streamlit app. Everything it shows is read from the Postgres database (db/read.py). The
-CSV files are only used once, to import the source data (scripts/load_db.py).
-Front page: one searchable, sortable table of all companies from all datasets
-("Benchmark": generated, "ASX/NZX leadership" and "UK government organograms": real,
-"PDL people": real people from People Data Labs), with a Dataset column and "Add people".
+Streamlit app. Everything it shows is read from the Postgres database (db/read.py).
+Front page: one searchable, sortable table of all companies ("PDL companies" and "PDL
+people"), with a Dataset column and "Add people".
 Click a company name (or use the sidebar) to open that company's inferred org chart.
 Company page: add, remove, promote and undo. Changes are saved in the database for everyone;
 "Reset demo data" in the sidebar puts the loaded data back.
@@ -29,19 +27,16 @@ from db.connect import get_connection
 st.set_page_config(page_title="Org Chart Inference", layout="wide")
 ROOT = Path(__file__).resolve().parent
 # Internal key -> name shown in the app. Names say where the data comes from.
-DATASETS = {"synthetic": "Benchmark", "real": "ASX/NZX leadership",
-            "uk": "UK government organograms", "pdl": "PDL people (real)",
-            "manual": "Added in the app"}
-GEN, ASX, UKN, PDL = (DATASETS[k] for k in ("synthetic", "real", "uk", "pdl"))
-OGL = ("Contains public sector information licensed under the "
-       "[Open Government Licence v3.0]"
-       "(https://www.nationalarchives.gov.uk/doc/open-government-licence/version/3/).")
+DATASETS = {"companies": "PDL companies", "pdl": "PDL people", "manual": "Added in the app"}
+GEN, PDL = (DATASETS[k] for k in ("companies", "pdl"))
 MODEL_THRESHOLD = json.loads((ROOT / "models" / "confidence_tree.json").read_text())[
     "decision_threshold"]
-UK_TUNE = {"U02", "U03", "U07", "U09", "U10", "U11"}   # UK fixes were designed on these
 PDL_MONTHLY_CREDITS = 100                               # free plan
 MAX_ADD = 20                                            # people per "Add people"
 TTL = 60                                                # seconds a database read is cached
+MAX_DB_BYTES = 450_000_000                              # no refresh from the app above this
+TOO_BIG = ("Refresh skipped: the database is above its 450 MB limit. Saved changes are kept "
+           "and are still waiting for a refresh.")
 NOT_CONNECTED = ("**Database not connected.** The app reads everything from the database. "
                  "Check DATABASE_URL and DATABASE_PASSWORD in the Streamlit secrets, or "
                  "resume the Supabase project if it was paused, then reload this page.")
@@ -131,20 +126,8 @@ def levels_html(company_id, version, threshold, _people):
 
 
 @st.cache_data(ttl=TTL, show_spinner=False)
-def load_sources():
-    """Where each real company / organisation comes from (table sources)."""
-    return dbread.sources()
-
-
-@st.cache_data(ttl=TTL, show_spinner=False)
 def db_runs():
     return dbread.runs()
-
-
-def when(dates):
-    """First recorded date of some source rows, e.g. "14 Nov 2026"."""
-    dates = pd.to_datetime(pd.Series(dates), errors="coerce").dropna()
-    return f"{dates.iloc[0]:%d %b %Y}" if len(dates) else "date not recorded"
 
 
 def apply_threshold(frame, threshold):
@@ -172,7 +155,7 @@ ss = st.session_state
 ss.setdefault("table_version", 0)
 
 # ---------------------------------------------------------------- all datasets
-# Company IDs never clash (C001, R01, U01, P01), so one table holds all of them.
+# Company IDs never clash (N001, P01, M001), so one table holds all of them.
 wanted = ss.get("open_next") or ss.get("company_select") or st.query_params.get("company", "")
 try:
     STATE = dbread.page_state(wanted)             # what changed? (one small query per page)
@@ -194,11 +177,11 @@ company_label = dict(zip(companies.company_id,
 dataset_of = dict(zip(companies.company_id, companies.dataset))
 # Organisations created in the app (saved in the database, source 'manual')
 NEW_ORGS = {c for c, d in dataset_of.items() if d == "manual"}
-st.query_params.pop("data", None)  # old links (?data=real&company=R01) still open R01
+st.query_params.pop("data", None)  # old links carried ?data=...: no longer used
 
 # ---------------------------------------------------------------- which company is open?
 # One source of truth: ss.company_select (also the sidebar dropdown's value).
-# Table clicks and the Back button write to it; the URL (?company=C001) mirrors it.
+# Table clicks and the Back button write to it; the URL (?company=N001) mirrors it.
 if ss.get("company_select") not in [""] + list(company_label):
     from_url = st.query_params.get("company", "")
     from_url = OLD_PDL_LINKS.get(from_url, from_url)
@@ -241,28 +224,19 @@ def ids_of(dataset, keep=lambda cid: True):
 
 def flow_svg():
     """docs/flow.svg with its numbers replaced by live numbers from the database (the
-    README keeps the still picture). The held-out seed 7 isn't in the database: that line
+    README keeps the still picture). The held-out test set isn't in the database: that line
     stays as measured from files (docs/experiments.md)."""
     svg = (ROOT / "docs" / "flow.svg").read_text(encoding="utf-8")
     t = MODEL_THRESHOLD
-    gen = db(db_accuracy, t, ids_of("synthetic"))
-    ukt = db(db_accuracy, t, ids_of("uk", lambda c: c not in UK_TUNE))
-    asx = db(db_accuracy, t, ids_of("real"))
+    gen = db(db_accuracy, t, ids_of("companies"))
     new = {
         r">\d[\d,]* companies, messy titles,<":
-            f">{COUNTS['synthetic']['companies']:,} companies, messy titles,<",
-        r">\d+ organisations, [\d,]+ posts<":
-            f">{COUNTS['uk']['companies']} organisations, {COUNTS['uk']['people']:,} posts<",
+            f">{COUNTS['companies']['companies']:,} companies, messy titles,<",
         r">\d+ senior people at \d+ company,<":
             f">{COUNTS.get('pdl', {}).get('people', 0)} senior people at "
             f"{COUNTS.get('pdl', {}).get('companies', 0)} company,<",
-        r">Benchmark seed 42: [^<]*<":
-            f">Benchmark seed 42: {pct(gen['precision'])} prec., {pct(gen['coverage'])} cov.<",
-        r">UK test half: [^<]*<":
-            f">UK test half: {pct(ukt['precision'])}, {pct(ukt['coverage'])}<",
-        r">ASX/NZX: [^<]*<":
-            f">ASX/NZX: {asx['right']} of {asx['given']} right, "
-            f"{pct(asx['coverage'], 0)} coverage<",
+        r">PDL companies: [^<]*<":
+            f">PDL companies: {pct(gen['precision'])} prec., {pct(gen['coverage'])} cov.<",
     }
     for pattern, text in new.items():
         svg = re.sub(pattern, text, svg)
@@ -275,26 +249,14 @@ def docs_dialog():
     st.image(flow_svg().replace("</defs>", FLOW_ANIMATION + "\n  </defs>"), width="stretch")
     st.caption(f"Numbers come from the database: the current reporting lines (last "
                f"refresh) at threshold {MODEL_THRESHOLD}, scored against the answer key. "
-               "The held-out seed 7 line is measured from files (docs/experiments.md, E5): "
+               "The held-out line is measured from files (docs/experiments.md, E5): "
                "that dataset is not in the database.")
-    src = db(load_sources)
-    key = src.what_it_shows.str.startswith("Confirms ")       # answer-key sources
-    pages = src[(src.dataset == ASX) & ~key]
-    uk = src[src.dataset == UKN]
     st.markdown("#### Sources")
     st.markdown(
-        f"- **{GEN}:** generated by `generate_data.py`. No outside source: every company, "
-        "name and title is made up, and the generator writes the answer key itself.\n"
-        f"- **{UKN}:** the senior-staff organogram CSV of {len(uk)} organisations from "
-        f"data.gov.uk (downloaded {when(uk.date_checked)}; "
-        "raw files in `data/raw/uk/`, links in the database table `sources`). The published "
-        "\"reports to\" column is the answer key. " + OGL + "\n"
-        f"- **{ASX}:** each company's own leadership page ({len(pages)} pages, checked "
-        f"{when(pages.date_checked)}). Its small answer key "
-        f"({COUNTS['confirmed_lines']} confirmed lines) comes from {key.sum()} written "
-        "company sources: announcements about the person, and annual reports or governance "
-        "statements. All of them are in the database table `sources` and under the chart on "
-        "each company's page; the exact quotes are in `scripts/build_real_truth.py`.\n"
+        f"- **{GEN}:** {COUNTS['companies']['companies']:,} companies chosen from the "
+        "[free company dataset](https://docs.peopledatalabs.com/docs/free-company-dataset), "
+        "with their names tidied. Company data: People Data Labs, "
+        "[CC BY 4.0](https://creativecommons.org/licenses/by/4.0/).\n"
         f"- **{PDL}:** {COUNTS.get('pdl', {}).get('people', 0)} senior people at one company, "
         "from the People Data Labs person API (cached; no answer key). The app shows their "
         "current job only.")
@@ -325,7 +287,7 @@ def database_page():
 
     with t_jobs:
         text = st.text_input("Find a person by name or id",
-                             placeholder="e.g. C001-E0002, or part of a name")
+                             placeholder="e.g. N001-E0002, or part of a name")
         st.caption("Every job a person has had, oldest first. A change never overwrites "
                    "anything: the old job is closed and a new one opened. For PDL people "
                    "(real people), only the current job is shown.")
@@ -430,8 +392,11 @@ def undo_last_change():
 
 def refresh_now():
     """Sidebar: re-infer only the companies with saved changes, with the rules (free), and
-    log the run. The public app never calls Gemini."""
+    log the run. The public app never calls Gemini. Skipped if the database is over its limit."""
     try:
+        if dbread.database_bytes() > MAX_DB_BYTES:
+            flash("warning", TOO_BIG)
+            return
         out = refresh.main("app_change")
     except (psycopg.Error, RuntimeError):
         flash("error", NOT_CONNECTED)
@@ -469,8 +434,13 @@ def reset_dialog():
         with st.spinner("Resetting and refreshing the affected companies…"):
             done = changes.reset_demo()
             st.cache_data.clear()
+            skipped = False
             try:
-                refresh.main("app_change")
+                skipped = dbread.database_bytes() > MAX_DB_BYTES
+                if skipped:
+                    flash("warning", TOO_BIG)
+                else:
+                    refresh.main("app_change")
             except (psycopg.Error, RuntimeError):
                 flash("warning", "The data was reset, but the refresh failed. Click \"Refresh "
                                  "changed companies\" in the sidebar.")
@@ -483,7 +453,8 @@ def reset_dialog():
     k = len(done["companies"])
     flash("success", f"Demo data reset: {done['people']} people, {done['companies_removed']} "
                      f"organisations and {done['queries']} saved queries removed; {k} "
-                     f"compan{'y' if k == 1 else 'ies'} refreshed.")
+                     f"compan{'y' if k == 1 else 'ies'} "
+                     f"{'waiting for a refresh' if skipped else 'refreshed'}.")
     ss.resetting = False
     ss.go_home = True              # the open company may have been removed
     ss.highlight = None
@@ -617,7 +588,7 @@ def remove_people_dialog(cid, co):
     label = dict(zip(co.employee_id, co.full_name + " — " + co.title.fillna("(no title)")))
     leaving = st.multiselect("Who is leaving?", list(label), format_func=label.get,
                              placeholder="Pick one or more people")
-    moving = st.text_input("Moving to (optional)", placeholder="a company id or name, e.g. C002")
+    moving = st.text_input("Moving to (optional)", placeholder="a company id or name, e.g. N002")
     st.caption("Saved in the database: their job here is closed (kept in their job history). "
                "If \"Moving to\" is a company in the database, they get a job there with the "
                "same title. Their team is placed again at the next refresh.")
@@ -731,15 +702,10 @@ for kind, text in ss.pop("flash", []):          # result of the last change / re
 if ss.get("db_view"):
     database_page()
     st.stop()
-REAL = bool(cid) and dataset_of[cid] == "real"
-UK = bool(cid) and dataset_of[cid] == "uk" and cid not in NEW_ORGS
 PDLCO = bool(cid) and dataset_of[cid] == "pdl"
-who = ("people with a confirmed manager" if REAL
-       else "people (excluding the top post)" if UK
-       else "people with a known manager (none: no answer key)" if PDLCO
+who = ("people with a known manager (none: no answer key)" if PDLCO
        else "people (excluding CEOs)")
-answer_key = ("the companies' written statements" if REAL
-              else "the published reporting lines" if UK else "the answer key")
+answer_key = "the answer key"
 
 # ================================================================ front page: all companies
 if not cid:
@@ -830,12 +796,10 @@ sc = scored                                      # people with a known manager (
 coverage, precision = score(apply_threshold(sc, threshold)) if len(sc) else (None, None)
 c1, c2, c3, c4 = st.columns(4)
 c1.metric("Employees", len(co) - len(not_here),
-          help="Leadership team members listed on the company's website" if REAL else
-          "People listed for this company, after removing duplicate rows")
+          help="People listed for this company, after removing duplicate rows")
 c2.metric("Industry", info.industry)
 c3.metric("Coverage", pct(coverage, 0),
-          help=f"Share of {who} who got a manager at this threshold"
-               + (f" ({len(sc)} people here)" if REAL else ""))
+          help=f"Share of {who} who got a manager at this threshold")
 if show_truth:
     c4.metric("Precision", pct(precision),
               help=f"Of the reporting lines drawn, the share that match {answer_key}")
@@ -1042,23 +1006,6 @@ with tab_reports:
     elif len(run_ids) == 1:
         st.caption("Before vs Now appears after this company's next refresh (it compares the "
                    "previous refresh with the latest one).")
-
-# ---------------------------------------------------------------- sources (real companies)
-if REAL or UK:
-    st.markdown("##### Sources")
-    if UK:
-        st.caption(OGL)                               # the licence requires this credit
-    for s in db(load_sources)[lambda s: s.company_id == cid].itertuples():
-        if UK:
-            st.markdown(f"- [Organogram file on data.gov.uk]({s.url}) — {s.what_it_shows}. "
-                        f"Downloaded {when(s.date_checked)}. "
-                        f"Licence: {s.licence}.")
-        elif s.what_it_shows.startswith("Confirms "):     # answer-key source
-            st.markdown(f"- [Answer-key source]({s.url}) — {s.what_it_shows}. Checked "
-                        f"{when(s.date_checked)}.")
-        else:
-            st.markdown(f"- [{s.company_name}: leadership page]({s.url}) — "
-                        f"{s.what_it_shows}. Checked {when(s.date_checked)}.")
 
 # ---------------------------------------------------------------- lookups and gaps (Org chart tab)
 with tab_chart:

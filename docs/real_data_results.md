@@ -1,5 +1,8 @@
 # Real-data results
 
+> **Offline evidence.** This dataset was removed from the database and the app on 22 Nov 2026.
+> The files and these results remain as evidence of accuracy on real data.
+
 Checks how the inference rules, built on synthetic data, handle real leadership titles.
 
 ## Data

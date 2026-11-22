@@ -28,42 +28,26 @@
 
   <!-- 1 · Data -->
   <text class="s" x="20" y="72">1 · Data</text>
-  <rect class="box blue" x="20" y="84" width="231" height="108" rx="8"/>
-  <text class="b" x="34" y="108">Benchmark generator</text>
-  <text class="m" x="34" y="126">generate_data.py</text>
-  <text class="t" x="34" y="146">500 companies, messy titles,</text>
+  <rect class="box blue" x="20" y="84" width="474" height="108" rx="8"/>
+  <text class="b" x="34" y="108">PDL company dataset</text>
+  <text class="m" x="34" y="126">scripts/pdl_shortlist.py</text>
+  <text class="t" x="34" y="146">740 companies, messy titles,</text>
   <text class="t" x="34" y="162">answer key with every manager</text>
-  <text class="t" x="34" y="178">seeds 42 (app), 7 (held out)</text>
+  <text class="t" x="34" y="178">Company data: People Data Labs, CC BY 4.0</text>
 
-  <rect class="box blue" x="263" y="84" width="231" height="108" rx="8"/>
-  <text class="b" x="277" y="108">UK government organograms</text>
-  <text class="m" x="277" y="126">scripts/build_uk.py</text>
-  <text class="t" x="277" y="146">12 organisations, 2,281 posts</text>
-  <text class="t" x="277" y="162">answer key: “reports to” column</text>
-  <text class="t" x="277" y="178">Open Government Licence v3.0</text>
+  <rect class="box blue" x="506" y="84" width="474" height="108" rx="8"/>
+  <text class="b" x="520" y="108">People Data Labs</text>
+  <text class="m" x="520" y="126">scripts/pdl_load.py (cached)</text>
+  <text class="t" x="520" y="146">53 senior people at 1 company,</text>
+  <text class="t" x="520" y="162">with their job history</text>
+  <text class="t" x="520" y="178">the app shows current job only</text>
 
-  <rect class="box blue" x="506" y="84" width="231" height="108" rx="8"/>
-  <text class="b" x="520" y="108">ASX/NZX leadership</text>
-  <text class="m" x="520" y="126">scripts/build_real.py</text>
-  <text class="t" x="520" y="146">20 companies, 218 leaders</text>
-  <text class="t" x="520" y="162">answer key: 43 lines confirmed</text>
-  <text class="t" x="520" y="178">in the companies’ own sources</text>
-
-  <rect class="box blue" x="749" y="84" width="231" height="108" rx="8"/>
-  <text class="b" x="763" y="108">People Data Labs</text>
-  <text class="m" x="763" y="126">scripts/pdl_load.py (cached)</text>
-  <text class="t" x="763" y="146">53 senior people at 1 company,</text>
-  <text class="t" x="763" y="162">with their job history</text>
-  <text class="t" x="763" y="178">the app shows current job only</text>
-
-  <path class="ar" d="M135 192 V214"/>
-  <path class="ar" d="M378 192 V214"/>
-  <path class="ar" d="M621 192 V214"/>
-  <path class="ar" d="M864 192 V214"/>
+  <path class="ar" d="M257 192 V214"/>
+  <path class="ar" d="M743 192 V214"/>
 
   <rect class="box blue" x="20" y="216" width="960" height="58" rx="8"/>
   <text class="b" x="36" y="239">Supabase Postgres: the app reads and writes only here</text>
-  <text class="m" x="440" y="239">scripts/load_db.py imports the CSVs once</text>
+  <text class="m" x="440" y="239">scripts/load_pdl_companies.py loads them</text>
   <text class="t" x="36" y="261"><tspan class="mi">employments</tspan> job history, never overwritten  ·  <tspan class="mi">reporting_lines</tspan> written by the model  ·  <tspan class="mi">answer_key</tspan> never shown to the model  ·  <tspan class="mi">runs</tspan> time and cost</text>
 
   <!-- 2 · Inference -->
@@ -99,9 +83,9 @@
   <text class="b" x="769" y="345">Confidence</text>
   <text class="m" x="769" y="362">models/confidence_tree.json</text>
   <text class="t" x="769" y="381">decision tree, 9 leaves, trained</text>
-  <text class="t" x="769" y="397">on Benchmark seed 1</text>
-  <text class="t" x="769" y="413">UK unit lines: share right per</text>
-  <text class="t" x="769" y="429">step, measured on the tune half</text>
+  <text class="t" x="769" y="397">on a separate training set</text>
+  <text class="t" x="769" y="413">checked on companies it</text>
+  <text class="t" x="769" y="429">was not trained on</text>
 
   <path class="ar" d="M245 384 H263"/>
   <path class="ar" d="M490 384 H508"/>
@@ -123,10 +107,8 @@
   <text class="b" x="356" y="524">Score</text>
   <text class="m" x="404" y="524">vs. answer_key</text>
   <text class="t" x="356" y="544">precision · coverage (from the database)</text>
-  <text class="t" x="356" y="562">Benchmark seed 42: 95.8% prec., 63.1% cov.</text>
-  <text class="t" x="356" y="578">held-out seed 7 (files): 95.4%, 63.7%</text>
-  <text class="t" x="356" y="594">UK test half: 85.0%, 25.3%</text>
-  <text class="t" x="356" y="610">ASX/NZX: 36 of 36 right, 84% coverage</text>
+  <text class="t" x="356" y="570">PDL companies: 97.5% prec., 66.7% cov.</text>
+  <text class="t" x="356" y="594">held-out test set (files): 95.4%, 63.7%</text>
 
   <rect class="box green" x="660" y="500" width="320" height="118" rx="8"/>
   <text class="b" x="676" y="524">Changes and refresh</text>

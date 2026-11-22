@@ -245,3 +245,47 @@ Storage and housekeeping:
   new job, which grew the 766-row `companies` table to 21 MB during the load. It now
   updates a company only if it isn't flagged yet. A one-time `VACUUM FULL companies` brought
   it back to 256 kB, and the database from 146 MB to 126 MB.
+
+## E10. App data replaced: real PDL companies with synthetic people (22 Nov 2026)
+
+**Change:** the Benchmark, ASX/NZX and UK data were removed from the database and the app.
+The app now has 740 real companies from PDL's free company dataset, filled with synthetic
+people, plus Atlassian. Company data: People Data Labs, CC BY 4.0. **The inference rules and
+the confidence tree did not change.**
+
+Data:
+- 740 companies across Australia, India, the UK and the US; size bands 51-200 to 1001-5000;
+  at least 100 people each (largest 1,969).
+- 262,007 synthetic people, 77,702 past jobs (42,603 job changes, 35,099 title changes), about
+  12.5% messy titles.
+- Made by `generate_pdl_people.py`; selected by `scripts/pdl_shortlist.py`; loaded by
+  `scripts/load_pdl_companies.py`.
+
+| Dataset | Scored | Drawn | Wrong | Precision | Coverage | Brier |
+|---|---:|---:|---:|---:|---:|---:|
+| **PDL companies, database = CSV** | 261,267 | 174,336 | 4,395 | **97.5%** | **66.7%** | 0.0228 |
+| Baseline v2, seed 42 (files) | | 98,684 | 4,727 | 95.2% | 62.7% | 0.0433 |
+| Held-out seed 7 (files) | | 95,794 | 4,411 | 95.4% | 63.7% | 0.0420 |
+| ASX/NZX (files) | 43 | 36 | 0 | 100% | 83.7% | |
+| UK, all 12 (files) | 2,269 | 426 | 66 | 84.5% | 18.8% | 0.1500 |
+
+- **All four baselines are unchanged.**
+- **The PDL result is not an improvement.** The new data is less messy than the v2 data, and
+  the rules are the same.
+- **Hard cases on the PDL companies:** normal 99.5% / 77.1%, contractors 99.7% / 86.8%, teams
+  with two managers 68.6% / 14.3%, manager missing 0% / 14.9%, dotted line 0% / 0.5%.
+
+Storage (limit for this project at the time: 350 MB; raised to 450 MB later on 22 Nov 2026):
+- **Peak during repeated full refreshes: 338.8 MB**, stable across the last two refreshes.
+  The space per person is about 1,280 bytes once dead rows are being reused.
+- **After the work: 273.6 MB.** The identical older line copies made by the measuring
+  refreshes (261,909 rows) were removed.
+- **One limit breach:** `VACUUM FULL` on `employments` needed a second copy of the table and
+  briefly passed 350 MB. A guard cancelled it within about a second and nothing changed.
+  `scripts/compact_db.py` now runs a normal `VACUUM` by default, and `--full` skips any table
+  whose extra copy wouldn't fit.
+- **Faster removal:** a single large deletion check ran over 31 minutes and was cancelled.
+  Deleting one company at a time removed 520 companies in 98 s.
+
+Tests on the final data: integrity 12/12, `test_app.py` 74/74, `test_app_changes.py` 33/33
+(all tables restored exactly), feature checks 38/38, database = CSV.

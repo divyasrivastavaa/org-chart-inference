@@ -22,20 +22,27 @@ Take-home task for Firmable (B2B sales intelligence). Deadline: Sat 7 Nov 2026.
 5. `train_confidence.py` -> trains the edge-confidence tree on a separate seed-1 dataset,
    saves `models/confidence_tree.json` (used by infer.py) + `.txt` (readable rules)
 
-`data/` is git-ignored; everything is reproducible (app data seed 42, held-out seed 7,
-training seed 1). `models/` IS committed (the hosted app needs it). The CSV files are only
-the source data, imported once into the database, plus the files-based measuring loop.
+App data: `scripts/pdl_shortlist.py` (real companies from the PDL free dataset, CC BY 4.0) ->
+`scripts/load_pdl_companies.py` + `generate_pdl_people.py` (synthetic people, past jobs and
+answer key; also written to `data/pdl_synth/`). The offline loop above stays for measuring.
+
+`data/` is git-ignored (offline seeds: 42, held-out 7, training 1). `models/` IS committed
+(the hosted app needs it). Benchmark, ASX/NZX and UK data are offline only, never in the app.
 
 ## Database (Phase 2): the app's only data source
 - Supabase Postgres. Tables: companies, people, employments (job history), reporting_lines,
   answer_key, runs (time, credits, tokens, cost), sources, change_log, saved_queries.
   Explained in `db/README.md`; plan and steps in `docs/db_plan.md`.
-- Setup order: `db/schema.sql` once, then `db/migrations/001` ... `006` (safe to rerun),
+- Data: 740 PDL companies (`N001`...) with 262,007 synthetic people and 77,702 past jobs, plus
+  Atlassian (`P01`, 53 real people). Size 273.6 MB; measured refresh peak 338.8 MB; limit
+  450 MB. Never run `VACUUM FULL` by hand: use `python scripts/compact_db.py`.
+- Setup order: `db/schema.sql` once, then `db/migrations/001` ... `012` (safe to rerun),
   via `python scripts/run_sql.py <file>`. A schema change = a NEW migration file + the same
   change in `db/schema.sql`.
-- Import: `python scripts/load_db.py` (COPY, safe to rerun). Infer: `python refresh.py`
-  (only companies with needs_refresh; keeps each company's last 2 refreshes; logs a runs
-  row and Logfire spans with IDs and counts only).
+- Import: `python scripts/load_pdl_companies.py` (only companies not loaded yet). Infer:
+  `python refresh.py` (only companies with needs_refresh; keeps each company's last 2
+  refreshes; logs a runs row and Logfire spans with IDs and counts only).
+  `python scripts/refresh_watch.py` does the same with a 450 MB guard.
 - Code: `db/connect.py` (get_connection, get_secret), `db/read.py` (everything the app
   reads), `db/changes.py` (every write: add/remove/promote/change job, undo_last,
   save_query; history is never overwritten: close the old row, open a new one),
@@ -46,9 +53,10 @@ the source data, imported once into the database, plus the files-based measuring
   LOGFIRE_TOKEN, GEMINI_API_KEY, PDL_API_KEY. Never print, log or commit them.
 - PDL: never call the API unless the user explicitly says so; use `data/pdl/cache/`.
 - Tests: `python scripts/test_app.py` (read only), `python scripts/test_app_changes.py`
-  (writes, then restores the database exactly), `python scripts/compare_db_csv.py`.
-- Numbers from the database (threshold 0.7): Benchmark 95.8% / 63.1% (CSV: 95.2% / 62.7%;
-  the gap is `-DUP` duplicate IDs, see E9), UK and ASX/NZX identical to the CSVs.
+  (writes, then restores the database exactly), `python scripts/check_pdl_load.py`,
+  `python scripts/compare_db_csv.py` (needs `python infer.py data/pdl_synth`).
+- Numbers from the database (threshold 0.7): PDL companies 97.5% / 66.7%, identical to the
+  CSVs (E10). This data is less messy, so it is not an improvement on the baseline below.
 
 ## Commands (Windows, from the repo root)
 - Activate env: `.venv\Scripts\activate`
@@ -58,7 +66,7 @@ the source data, imported once into the database, plus the files-based measuring
 - Retrain confidence: `python train_confidence.py` (`python infer.py --rules` = no tree)
 - App: `streamlit run app.py` (needs the database secrets; see Database below)
 
-## Current baseline, see docs/experiments.md (E5)
+## Current offline baseline, see docs/experiments.md (E5, E10)
 Decision tree confidence, threshold 0.7 (wrong edge ~2.3x a missing edge):
 - v2 data (default, seed 42): precision 95.2%, coverage 62.7%, 4,727 wrong edges, Brier 0.0433.
 - v2 held-out (`--seed 7 --out data/holdout_seed7`): 95.4% / 63.7%, Brier 0.0420.

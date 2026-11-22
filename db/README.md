@@ -14,12 +14,17 @@ Two rules shape every table:
 
 | Table | One row is … | In simple words |
 |---|---|---|
-| `companies` | a company or organisation | Name, industry, size, where it came from (`source`: benchmark, asx_nzx, uk_organogram, pdl, pdl_history, manual) and `needs_refresh`, which is true when its org chart is out of date. |
-| `people` | a person | Their name and where they came from. A person appears once, even after moving between companies. Existing data keeps its old IDs (`C001-E0001`). |
+| `companies` | a company or organisation | Name, industry, size, where it came from (`source`: pdl_company, pdl, pdl_history, manual) and `needs_refresh`, which is true when its org chart is out of date. |
+| `people` | a person | Their name and where they came from. A person appears once, even after moving between companies. Generated people have IDs like `N001-E0001`. |
 | `employments` | one job: a person, at a company, with a title, for a period | The job history. `is_current` marks today's job. `change_type` says why the row exists: `initial` (first load, or the earliest job in a PDL history), `new` (person added by hand), `job_change` (came from another company) or `title_change` (same company, new title). `seniority` is the source's level when it gives one (PDL: e.g. `vp`). `previous_employment_id` points to the row it replaced, so a career can be followed step by step. Leaving is shown by the old row being closed. |
 | `reporting_lines` | a person's inferred manager in one run | `manager_id` is the drawn line (confidence at or above the threshold). It is empty when the model abstained, and `reason` says why. `proposed_manager_id` is the best candidate even when not drawn. `judge` is rules, gemini or interim. A new row is written only when a line changes; the old row gets `is_current = false`. |
 | `runs` | one inference run | When it started and finished, its status, how many companies and people it processed, how many lines changed, the Gemini calls and tokens, the PDL credits used and the cost in USD. |
 | `answer_key` | a person's true manager | Used only to measure precision and coverage. The inference code never reads it. |
+
+**Data now:** 740 real companies from PDL's free company dataset (`pdl_company`), filled with
+synthetic people (`generated`), plus Atlassian's 53 real people (`pdl`) and their 244 past
+employers (`pdl_history`). Company data: People Data Labs, CC BY 4.0. The `sources` table is
+kept but empty.
 
 How they connect: `people` → `employments` ← `companies`, and each `reporting_lines` row
 belongs to one `run`, one company, one person and (if drawn) one manager, who is also in
@@ -45,7 +50,7 @@ select p.full_name, c.name as company, e.title, e.start_date, e.end_date,
 from employments e
 join people    p on p.person_id  = e.person_id
 join companies c on c.company_id = e.company_id
-where p.person_id = 'C001-E0001'          -- or: where p.full_name ilike '%some name%'
+where p.person_id = 'N001-E0001'          -- or: where p.full_name ilike '%some name%'
 order by e.start_date nulls first, e.recorded_at;
 ```
 
@@ -58,7 +63,7 @@ join people p      on p.person_id = rl.person_id
 left join people m on m.person_id = rl.manager_id
 left join employments e on e.person_id = rl.person_id
                        and e.company_id = rl.company_id and e.is_current
-where rl.company_id = 'C001' and rl.is_current
+where rl.company_id = 'N001' and rl.is_current
 order by m.full_name nulls first, p.full_name;
 ```
 
@@ -117,7 +122,7 @@ from reporting_lines rl
 join people p on p.person_id = rl.person_id
 left join employments e on e.person_id = rl.person_id
                        and e.company_id = rl.company_id and e.is_current
-where rl.company_id = 'C001'
+where rl.company_id = 'N001'
   and rl.is_current
   and rl.manager_id is null
   and rl.reason is distinct from 'top of company'

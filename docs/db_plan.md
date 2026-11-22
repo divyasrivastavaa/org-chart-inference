@@ -1,5 +1,9 @@
 # Phase 2: database — plan
 
+> **Historical plan.** The Benchmark, ASX/NZX and UK data it describes were removed from the
+> database on 22 Nov 2026, and `scripts/load_db.py` was retired. The app now has real PDL
+> companies with synthetic people, plus Atlassian: see `README.md` and experiment E10.
+
 This phase moves the project from CSV files to a Postgres database (a free Supabase project
 in the Mumbai region). It adds:
 

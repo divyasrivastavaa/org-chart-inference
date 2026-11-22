@@ -1,5 +1,8 @@
 # UK government organograms: results
 
+> **Offline evidence.** This dataset was removed from the database and the app on 22 Nov 2026.
+> The files and these results remain as evidence of accuracy on real data.
+
 Third dataset, added 16 Nov 2026: real organisations with a **real, complete answer key**.
 
 Contains public sector information licensed under the
